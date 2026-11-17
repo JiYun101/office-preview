@@ -1,0 +1,41 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Continuous PPT resource checks</title><style>body{font:14px/1.6 system-ui;margin:20px}pre{white-space:pre-wrap}.viewer{width:900px;height:500px}</style></head><body><h1>幻灯片连续滚动与资源回收</h1><pre id="results">检查中…</pre><div id="area"></div><script type="module">
+import { OfficePreview, parseDocument } from '../src/index.js';
+import { renderModel } from '../src/render.js';
+import { viewerStyles } from '../src/styles.js';
+const area=document.querySelector('#area'),results=[],output=document.querySelector('#results');
+const assert=(ok,message)=>{if(!ok)throw new Error(message);};
+const wait=async predicate=>{const end=Date.now()+10000;while(Date.now()<end){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('幻灯片滚动检查超时');};
+async function check(name,fn){try{await fn();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}}
+const bytes=await fetch('../fixtures/styled.ppt?raw=1').then(response=>response.arrayBuffer());
+
+await check('100页只挂载邻近内容，离开与销毁后释放图片URL',async()=>{
+  const parsed=await parseDocument(bytes,{name:'source.ppt'}),picture=parsed.slides[0].elements.find(item=>item.type==='image');
+  assert(picture?.bytes?.length,'图片样本未读取');
+  const created=new Set(),active=new Set(),nativeCreate=URL.createObjectURL,nativeRevoke=URL.revokeObjectURL;
+  URL.createObjectURL=function(...args){const value=nativeCreate.apply(this,args);created.add(value);active.add(value);return value;};
+  URL.revokeObjectURL=function(value){active.delete(value);return nativeRevoke.call(this,value);};
+  const host=document.createElement('div');host.className='viewer';area.append(host);host.scrollIntoView();
+  const root=host.attachShadow({mode:'open'}),style=document.createElement('style');style.textContent=viewerStyles;
+  const viewport=document.createElement('div'),content=document.createElement('div'),auxiliary=document.createElement('div');
+  viewport.className='op-viewport';viewport.style.height='300px';content.className='op-content';viewport.append(content);root.append(style,viewport,auxiliary);
+  let rendered;
+  try{
+    const slides=Array.from({length:100},(_,index)=>({elements:[{...picture,x:0,y:0,width:100,height:100},{type:'text',x:110,y:0,width:400,height:80,runs:[{text:`Slide ${index+1}`}]}]}));
+    rendered=renderModel({kind:'presentation',format:'ppt',width:600,height:400,slides},viewport,content,auxiliary);await rendered.ready;
+    assert(root.querySelectorAll('.op-slide-page').length===100,'没有保留完整幻灯片页序');
+    await wait(()=>root.querySelector('.op-slide-page').dataset.ready==='true');
+    viewport.scrollTop=viewport.scrollHeight;
+    await wait(()=>root.querySelector('.op-slide-page:last-child').dataset.ready==='true');
+    assert(root.querySelector('.op-slide-page:last-child').textContent.includes('Slide 100'),'滚动没有显示末页');
+    assert(root.querySelectorAll('.op-slide-text').length<12&&active.size<12,'离开视口后仍保留过多页面内容或图片资源');
+    assert(created.size>active.size,'离开的图片URL没有被释放');
+    rendered.dispose();rendered=null;assert(active.size===0,'销毁后图片URL仍存活');
+  }finally{rendered?.dispose();host.remove();URL.createObjectURL=nativeCreate;URL.revokeObjectURL=nativeRevoke;}
+});
+
+await check('末页可滚到缩放控件上方，缩放不会遮住最终内容',async()=>{
+  const host=document.createElement('div');host.className='viewer';area.append(host);host.scrollIntoView();const preview=new OfficePreview(host),root=host.firstElementChild.shadowRoot;
+  try{await preview.open(bytes,{name:'sample.ppt'});const viewport=root.querySelector('.op-viewport'),last=root.querySelector('.op-slide-page:last-child');viewport.scrollTop=viewport.scrollHeight;await wait(()=>last.dataset.ready==='true');const controls=root.querySelector('.op-zoom-controls');assert(last.getBoundingClientRect().bottom<=controls.getBoundingClientRect().top,'末页下缘被悬浮缩放遮挡');preview.setZoom(2);viewport.scrollTop=viewport.scrollHeight;await wait(()=>last.dataset.ready==='true');assert(last.getBoundingClientRect().bottom<=controls.getBoundingClientRect().top,'200%缩放时安全留白不足');}finally{preview.destroy();host.remove();}
+});
+window.officeBrowserTestResults={total:results.length,passed:results.every(item=>item.ok),results};document.documentElement.dataset.status=results.every(item=>item.ok)?'pass':'fail';document.title=`${results.every(item=>item.ok)?'PASS':'FAIL'} ${results.filter(item=>item.ok).length}/${results.length}`;output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);
+</script></body></html>

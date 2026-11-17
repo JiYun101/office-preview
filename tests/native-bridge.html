@@ -1,0 +1,6 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>WKWebView bridge protocol fixture</title><style>html,body,#viewer{height:100%;margin:0}</style></head><body><div id="viewer"></div>
+<script>
+// A test double for the native message channel; this does not emulate WebKit.
+window.nativeMessages = [];
+window.webkit = { messageHandlers: { officePreview: { postMessage(message) { window.nativeMessages.push(message); } } } };
+</script><script type="module" src="../demo/embed.js"></script></body></html>

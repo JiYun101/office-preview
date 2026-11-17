@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Office Preview · iframe 嵌入示例</title>
+  <style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0}body{display:flex;flex-direction:column;background:#f2f4f7;color:#34415b;font:13px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    header{display:flex;align-items:center;gap:16px;padding:10px 16px;background:#fff;border-bottom:1px solid #e1e6ef;flex-wrap:wrap;flex-shrink:0}strong{font-weight:600}a{color:#5368d4;text-decoration:none}input{font:inherit;max-width:280px}input::file-selector-button{font:inherit;padding:5px 10px;background:#f6f8fc;border:1px solid #dce2ec;border-radius:5px;color:#4d5d78;cursor:pointer}input:disabled{opacity:.4}#status{margin-left:auto;color:#728096;overflow-wrap:anywhere}iframe{display:block;width:100%;flex:1;min-height:0;border:0}a:focus-visible,input:focus-visible{outline:2px solid #5368d4;outline-offset:3px}@media(max-width:650px){header{gap:10px}#status{margin-left:0;width:100%}}
+  </style>
+</head>
+<body>
+  <!-- This header belongs to the host app; it is outside the embedded viewer. -->
+  <header>
+    <a href="../">← 演示</a><strong>宿主文件栏</strong>
+    <input id="file" aria-label="选择预览文件" type="file" accept=".csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.tsv,.txt,.pdf,.eml,.msg" disabled>
+    <a href="./sdk.html">直接 SDK 示例</a><span id="status" role="status" aria-live="polite">等待预览器就绪…</span>
+  </header>
+  <iframe id="preview" title="文件预览"></iframe>
+  <script type="module">
+    const frame = document.querySelector('#preview');
+    const input = document.querySelector('#file');
+    const status = document.querySelector('#status');
+    const viewerOrigin = location.origin; // Can instead be the deployed viewer's exact origin.
+    let requestId = 0;
+    window.addEventListener('message', event => {
+      if (event.origin !== viewerOrigin || event.source !== frame.contentWindow) return;
+      const message = event.data;
+      if (!message || typeof message !== 'object') return;
+      if (message.type === 'office-preview:ready') { input.disabled = false; status.textContent = '已就绪'; return; }
+      if (message.requestId !== requestId) return;
+      if (message.type === 'office-preview:loaded') {
+        status.textContent = `已读取 ${message.name}`;
+        status.title = (message.warnings || []).join('\n');
+      }
+      if (message.type === 'office-preview:error') { status.textContent = message.error; status.title = ''; }
+    });
+    input.onchange = async () => {
+      const file = input.files[0]; if (!file) return;
+      const id = ++requestId;
+      status.textContent = '正在读取…'; status.title = ''; input.value = '';
+      try {
+        if (file.size > 32 * 1024 * 1024) throw new Error('文件超过当前 32MB 限制。');
+        const buffer = await file.arrayBuffer();
+        if (id !== requestId) return;
+        frame.contentWindow.postMessage({ type: 'office-preview:open', requestId: id, buffer, name: file.name }, viewerOrigin, [buffer]);
+        status.textContent = '正在解析…';
+      } catch (error) { if (id === requestId) status.textContent = error.message; }
+    };
+    frame.src = `../embed.html?parentOrigin=${encodeURIComponent(location.origin)}`;
+  </script>
+</body>
+</html>

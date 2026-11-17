@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PDF 绘制样式验证</title>
+<style>body{font:14px/1.6 system-ui;margin:24px}pre{white-space:pre-wrap}.viewer{width:700px;height:250px;overflow:auto;position:relative;margin:16px 0;border:1px solid #ccc}</style>
+<h1>PDF 绘制样式验证</h1>
+<p>直接调用生产渲染器，以自产图形和三角形、方形字体检查真实画布像素。</p>
+<pre id="results">检查中…</pre>
+<div id="area"></div>
+<script type="module">
+import { renderPdf } from '../src/render-pdf.js';
+import { preparePdfFontProgram } from '../src/parsers/pdf-font-program.js';
+import { buildPdfFontFixture } from '../scripts/pdf-font-fixture.mjs';
+
+const area=document.querySelector('#area'),output=document.querySelector('#results'),results=[];
+const assert=(value,message)=>{if(!value)throw new Error(message);};
+const rect=(x,y,width,height)=>[['M',x,y],['L',x+width,y],['L',x+width,y+height],['L',x,y+height],['Z']];
+async function check(name,action){
+  try{await action();results.push({name,ok:true});}
+  catch(error){results.push({name,ok:false,error:error.stack||error.message});}
+  output.textContent=JSON.stringify(results,null,2);
+}
+async function paint(operations,action,{width=240,height=120,fonts=[]}={}){
+  const viewport=document.createElement('div');viewport.className='viewer';
+  const content=document.createElement('div');viewport.append(content);area.append(viewport);viewport.scrollIntoView({block:'start'});
+  const rendered=renderPdf({pages:[{width,height,operations}],fonts,warnings:[]},viewport,content,document.createElement('div'));
+  try{
+    await rendered.ready;
+    const canvas=content.querySelector('canvas');
+    assert(canvas?.dataset.ready==='true','生产渲染器未完成真实画布');
+    const context=canvas.getContext('2d'),scale=context.getTransform().a;
+    const pixel=(x,y)=>Array.from(context.getImageData(Math.floor(x*scale),Math.floor(canvas.height-y*scale),1,1).data).slice(0,3);
+    await action({canvas,context,pixel});
+  }finally{rendered.dispose();viewport.remove();}
+}
+function near(actual,expected,label,tolerance=3){
+  assert(actual.every((value,index)=>Math.abs(value-expected[index])<=tolerance),`${label}: ${actual.join(',')}，期望 ${expected.join(',')}`);
+}
+
+await check('填充、描边和图片分别按透明度合成，后续图形恢复不透明',async()=>{
+  await paint([
+    {type:'path',commands:rect(20,20,60,60),fill:'#ff0000',fillOpacity:.25,stroke:'#0000ff',strokeOpacity:.75,lineWidth:8},
+    {type:'path',commands:rect(100,20,30,60),fill:'#ff0000'},
+    {type:'path',commands:[['M',160,20],['L',160,80]],stroke:'#0000ff',lineWidth:8},
+    {type:'image',rgba:new Uint8Array([0,255,0,255]),pixelWidth:1,pixelHeight:1,x:190,y:20,width:20,height:20,fillOpacity:.5},
+    {type:'path',commands:rect(190,55,20,20),fill:'#000000'},
+  ],({pixel})=>{
+    near(pixel(50,50),[255,191,191],'25% 红色填充');
+    near(pixel(18,50),[64,64,255],'75% 蓝色描边');
+    near(pixel(115,50),[255,0,0],'后续填充默认透明度');
+    near(pixel(160,50),[0,0,255],'后续描边默认透明度');
+    near(pixel(200,30),[128,255,128],'图片使用非描边透明度');
+    near(pixel(200,65),[0,0,0],'图片绘制后透明度复位');
+  });
+});
+
+await check('嵌入字形保留墨迹比例，文字填充、描边、双绘和不可见模式正确',async()=>{
+  const program=preparePdfFontProgram(buildPdfFontFixture());
+  const fonts=[{id:'paint-square',weight:400,style:'normal',program:{bytes:program.bytes,format:program.format}}];
+  const operations=[0,1,2,3,7].map((textMode,index)=>({
+    type:'text',text:'B',renderText:program.renderText(2),fontId:'paint-square',fontWeight:400,fontStyle:'normal',
+    matrix:[1,0,0,1,20+index*60,40],fontSize:40,width:100,color:'#ff0000',stroke:'#0000ff',lineWidth:2,textMode,
+  }));
+  await paint(operations,({pixel})=>{
+    near(pixel(36,56),[255,0,0],'填充文字内部');
+    near(pixel(60,56),[255,255,255],'800/1000 em 方形不得被拉到 100pt advance');
+    near(pixel(96,56),[255,255,255],'描边文字内部为空');
+    near(pixel(80,56),[0,0,255],'描边文字轮廓',12);
+    near(pixel(156,56),[255,0,0],'双绘文字保留填充');
+    near(pixel(140,56),[0,0,255],'双绘文字保留描边',12);
+    near(pixel(216,56),[255,255,255],'模式3文字不可见');
+    near(pixel(276,56),[255,255,255],'模式7文字不可见');
+  },{width:340,fonts});
+});
+
+await check('虚线、线帽、连接和斜接参数进入原生绘图且不污染下一笔',async()=>{
+  const original=CanvasRenderingContext2D.prototype.stroke,calls=[];
+  CanvasRenderingContext2D.prototype.stroke=function(...args){
+    if(this.canvas.classList.contains('op-pdf-page'))calls.push({width:this.lineWidth,cap:this.lineCap,join:this.lineJoin,miter:this.miterLimit,dash:this.getLineDash(),phase:this.lineDashOffset});
+    return original.apply(this,args);
+  };
+  try{
+    await paint([
+      {type:'path',commands:[['M',20,50],['L',80,50],['L',80,90]],stroke:'#000000',lineWidth:2,lineCap:1,lineJoin:2,miterLimit:7,dash:[10,10],dashPhase:2},
+      {type:'path',commands:[['M',20,20],['L',100,20]],stroke:'#000000',lineWidth:2},
+    ],({pixel})=>{
+      assert(calls.length===2,'未记录到两次原生描边');
+      assert(JSON.stringify(calls[0])===JSON.stringify({width:2,cap:'round',join:'bevel',miter:7,dash:[10,10],phase:2}),'描边参数没有完整传给 Canvas');
+      assert(JSON.stringify(calls[1])===JSON.stringify({width:2,cap:'butt',join:'miter',miter:10,dash:[],phase:0}),'后续描边继承了前一笔的虚线或连接样式');
+      near(pixel(24,50),[0,0,0],'虚线实线段');
+      near(pixel(33,50),[255,255,255],'虚线间隙');
+      near(pixel(33,20),[0,0,0],'下一笔恢复实线');
+    });
+  }finally{CanvasRenderingContext2D.prototype.stroke=original;}
+});
+
+const passed=results.every(result=>result.ok);
+window.officeBrowserTestResults={passed,results};
+document.documentElement.dataset.status=passed?'passed':'failed';
+document.title=`${passed?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length} · PDF 绘制`;
+output.textContent=JSON.stringify({passed,tests:results.length,results},null,2);
+</script>
+</html>

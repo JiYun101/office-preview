@@ -1,0 +1,123 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Word 表格与浮动图片核验</title><style>html,body{margin:0;height:100%;overflow:hidden}#viewer{height:100%}input{display:none}</style><input id="fixture-files" type="file" accept=".docx,.doc"><div id="viewer"></div><script type="module">
+const parameters=new URLSearchParams(location.search),source=parameters.get('source');
+const {OfficePreview}=await import(source?.startsWith('/artifacts/word-report-')?source:'../src/index.js');
+const preview=new OfficePreview(document.querySelector('#viewer'),{zoom:1,showZoom:false});
+const root=preview.root;
+const style=document.createElement('style');style.textContent='.op-viewport{scrollbar-width:none}.op-viewport::-webkit-scrollbar{display:none}';root.append(style);
+const frame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
+function rect(node,paper){const r=node.getBoundingClientRect(),p=paper?.getBoundingClientRect();return {x:r.x-(p?.x||0),y:r.y-(p?.y||0),width:r.width,height:r.height};}
+const paint=node=>{const s=getComputedStyle(node);return {fontFamily:s.fontFamily,fontSize:s.fontSize,fontWeight:s.fontWeight,lineHeight:s.lineHeight,textAlign:s.textAlign,verticalAlign:s.verticalAlign,position:s.position,zIndex:s.zIndex,borders:['Top','Right','Bottom','Left'].map(side=>({style:s['border'+side+'Style'],color:s['border'+side+'Color'],width:s['border'+side+'Width']})),padding:[s.paddingTop,s.paddingRight,s.paddingBottom,s.paddingLeft]};};
+let model;
+window.wordReport={
+  async open(file=document.querySelector('#fixture-files').files[0]){
+    if(!file)throw new Error('No local File selected.');
+    model=await preview.open(file);preview.setZoom(1);await document.fonts.ready;
+    for(const image of root.querySelectorAll('img'))image.loading='eager';
+    await Promise.all([...root.querySelectorAll('img')].map(image=>image.decode().catch(()=>{})));await frame();await frame();
+    const papers=[...root.querySelectorAll('.op-paper')],paper=papers[0],body=paper?.querySelector('.op-word-page-body');
+    const tables=[...paper.querySelectorAll('table')].map(table=>({box:rect(table,paper),style:paint(table),rows:[...table.rows].map(row=>({box:rect(row,paper),cells:[...row.cells].map(cell=>({box:rect(cell,paper),colSpan:cell.colSpan,rowSpan:cell.rowSpan,style:paint(cell)}))}))}));
+    return {format:model.format,pageCount:papers.length,modelPage:model.page,paper:rect(paper),body:body?rect(body,paper):null,tables,images:[...paper.querySelectorAll('img')].map(image=>({box:rect(image,paper),naturalWidth:image.naturalWidth,naturalHeight:image.naturalHeight,style:paint(image),parent:image.parentElement.className})),paragraphs:[...paper.querySelectorAll('.op-word-paragraph')].map(p=>({box:rect(p,paper),style:paint(p)})),warnings:model.warnings?.length||0,sectionCount:model.sections?.length||0};
+  },
+  async page(index=0){const paper=root.querySelectorAll('.op-paper')[index];paper.scrollIntoView({block:'start',inline:'nearest'});await frame();await frame();return rect(paper);},
+  destroy(){preview.destroy();}
+};
+
+if(!parameters.has('inspect')&&!source){
+  const [{buildWordTableFixtureEntries},{crc32}]=await Promise.all([import('../scripts/word-table-fixture.mjs'),import('../src/containers/zip.js')]);
+  // Stored ZIP fixture writer; the runtime remains the real Worker/SDK path.
+  function archive(entries){
+    const encoder=new TextEncoder(),locals=[],central=[];let offset=0;
+    const header=(length,signature)=>{const bytes=new Uint8Array(length),view=new DataView(bytes.buffer);view.setUint32(0,signature,true);return {bytes,view};};
+    const append=(chunks)=>{const bytes=new Uint8Array(chunks.reduce((sum,part)=>sum+part.length,0));let at=0;for(const part of chunks){bytes.set(part,at);at+=part.length;}return bytes;};
+    for(const [name,value] of Object.entries(entries)){
+      const filename=encoder.encode(name),data=value instanceof Uint8Array?value:encoder.encode(value),crc=crc32(data),local=header(30,0x04034b50),directory=header(46,0x02014b50);
+      local.view.setUint16(4,20,true);local.view.setUint16(6,0x800,true);local.view.setUint32(14,crc,true);local.view.setUint32(18,data.length,true);local.view.setUint32(22,data.length,true);local.view.setUint16(26,filename.length,true);
+      directory.view.setUint16(4,20,true);directory.view.setUint16(6,20,true);directory.view.setUint16(8,0x800,true);directory.view.setUint32(16,crc,true);directory.view.setUint32(20,data.length,true);directory.view.setUint32(24,data.length,true);directory.view.setUint16(28,filename.length,true);directory.view.setUint32(42,offset,true);
+      locals.push(local.bytes,filename,data);central.push(directory.bytes,filename);offset+=30+filename.length+data.length;
+    }
+    const end=header(22,0x06054b50),count=Object.keys(entries).length;end.view.setUint16(8,count,true);end.view.setUint16(10,count,true);end.view.setUint32(12,central.reduce((size,part)=>size+part.length,0),true);end.view.setUint32(16,offset,true);
+    return append([...locals,...central,end.bytes]);
+  }
+  const results=[],assert=(value,message)=>{if(!value)throw new Error(message);},near=(value,expected,message,tolerance=1.5)=>assert(Math.abs(value-expected)<=tolerance,`${message}: ${value} vs ${expected}`);
+  const check=async(name,action)=>{try{await action();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}};
+  const file=options=>new File([archive(buildWordTableFixtureEntries(options))],'self-authored-table.docx',{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
+  function anchorFile({stampHeight=80,imageRunSize=120,nativeGrid=false}={}){
+    const entries=buildWordTableFixtureEntries(),emu=value=>Math.round(value*9525);
+    const anchor=(horizontal,vertical,width,height)=>`<w:r><w:rPr><w:sz w:val="${imageRunSize}"/></w:rPr><w:drawing><wp:anchor behindDoc="0" layoutInCell="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="${horizontal.relative}">${horizontal.align?`<wp:align>${horizontal.align}</wp:align>`:`<wp:posOffset>${emu(horizontal.offset)}</wp:posOffset>`}</wp:positionH><wp:positionV relativeFrom="${vertical.relative}"><wp:posOffset>${emu(vertical.offset)}</wp:posOffset></wp:positionV><wp:extent cx="${emu(width)}" cy="${emu(height)}"/><wp:wrapNone/><wp:docPr id="1" name="Self-authored geometry"/><a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rGeometry"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+    const logo=anchor({relative:'margin',align:'right'},{relative:'page',offset:40},32,16),stamp=anchor({relative:'column',offset:10},{relative:'paragraph',offset:6},24,stampHeight);
+    const namespaces='xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+    entries['word/document.xml']=entries['word/document.xml'].replace('<w:document ','<w:document '+namespaces+' ').replace('<w:tbl>','<w:p><w:pPr><w:spacing w:line="300" w:lineRule="exact"/></w:pPr><w:r><w:t>Geometry</w:t></w:r>'+logo+'</w:p><w:tbl>').replace('<w:t>A</w:t></w:r>','<w:t>A</w:t></w:r>'+stamp);
+    if(nativeGrid)entries['word/document.xml']=entries['word/document.xml'].replace('w:val="600" w:hRule="exact"','w:val="570" w:hRule="atLeast"').replace('<w:top w:w="30"','<w:top w:w="60"').replace('<w:bottom w:w="30"','<w:bottom w:w="60"').replace('</w:sectPr>','<w:docGrid w:type="lines" w:linePitch="312"/></w:sectPr>');
+    entries['[Content_Types].xml']=entries['[Content_Types].xml'].replace('</Types>','<Default Extension="png" ContentType="image/png"/></Types>');
+    entries['word/_rels/document.xml.rels']=entries['word/_rels/document.xml.rels'].replace('/>','><Relationship Id="rGeometry" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/geometry.png"/></Relationships>');
+    const canvas=document.createElement('canvas');canvas.width=8;canvas.height=4;const context=canvas.getContext('2d');context.fillStyle='#1234cd';context.fillRect(0,0,8,4);entries['word/media/geometry.png']=Uint8Array.from(atob(canvas.toDataURL('image/png').split(',')[1]),character=>character.charCodeAt(0));
+    return new File([archive(entries)],'self-authored-anchor.docx',{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
+  }
+  await check('DOCX 经 File/Worker 后保留非等宽网格、纵横合并和行高',async()=>{
+    const info=await window.wordReport.open(file()),table=root.querySelector('table'),rows=[...table.rows];
+    assert(info.format==='docx'&&rows.length===3,'Fixture did not reach the real DOCX renderer.');near(table.getBoundingClientRect().width,600,'Table width');
+    [...rows[2].cells].forEach((cell,index)=>near(cell.getBoundingClientRect().width,[60,120,180,240][index],'Grid column '+index));
+    rows.forEach((row,index)=>near(row.getBoundingClientRect().height,[42,65,35][index],'Row height '+index));
+    assert(rows[0].cells[0].colSpan===2&&rows[0].cells[1].rowSpan===2,'Merged span missing.');near(rows[0].cells[1].getBoundingClientRect().height,107,'Vertically merged height');
+  });
+  await check('DOCX 表格边框、内边距、底色和垂直居中作用于真实单元格',async()=>{
+    const cell=root.querySelector('table').rows[0].cells[0],style=getComputedStyle(cell);
+    assert(style.borderTopStyle==='solid'&&style.borderTopColor==='rgb(0, 0, 0)','Original border paint missing.');near(parseFloat(style.borderTopWidth),1,'Border width',.1);
+    [style.paddingTop,style.paddingRight,style.paddingBottom,style.paddingLeft].forEach((value,index)=>near(parseFloat(value),[2,4,2,4][index],'Cell padding '+index,.1));
+    assert(style.backgroundColor==='rgb(221, 238, 255)'&&style.verticalAlign==='middle','Cell shading or vertical alignment missing.');
+    const paragraph=cell.querySelector('.op-word-paragraph'),c=cell.getBoundingClientRect(),p=paragraph.getBoundingClientRect();near(p.top-c.top,c.bottom-p.bottom,'Cell text vertical center',2);
+  });
+  await check('百分比表格跟随正文宽度并保持非等宽网格比例',async()=>{
+    await window.wordReport.open(file({percentage:true}));const table=root.querySelector('table'),body=table.closest('.op-word-page-body'),width=table.getBoundingClientRect().width;
+    near(width,body.getBoundingClientRect().width,'Percentage table width');
+    [...table.rows[2].cells].forEach((cell,index)=>near(cell.getBoundingClientRect().width/width,[.1,.2,.3,.4][index],'Relative grid '+index,.005));
+  });
+  await check('浮图使用页边距/页面及单元格/段落锚点，图片高度和run字号不撑大行高',async()=>{
+    await window.wordReport.open(anchorFile());
+    const paper=root.querySelector('.op-paper'),images=[...paper.querySelectorAll('img')],table=paper.querySelector('table'),cell=table.rows[0].cells[0],paragraph=cell.querySelector('.op-word-paragraph'),page=paper.getBoundingClientRect(),body=paper.querySelector('.op-word-page-body').getBoundingClientRect();
+    assert(images.length===2&&images.every(image=>image.naturalWidth===8),'Anchored images did not decode.');
+    const logoBox=images[0].getBoundingClientRect(),stampBox=images[1].getBoundingClientRect();near(logoBox.right,body.right,'Margin-right logo position');near(logoBox.top-page.top,40,'Page-relative logo height');near(logoBox.width,32,'Logo width');near(logoBox.height,16,'Logo height');
+    near(stampBox.left-cell.getBoundingClientRect().left,14,'Cell column offset');near(stampBox.top-paragraph.getBoundingClientRect().top,6,'Paragraph offset');near(table.rows[0].getBoundingClientRect().height,42,'Floating stamp changed row height');near(paper.querySelector('.op-word-page-body>.op-word-paragraph').getBoundingClientRect().height,20,'Image-only run font size changed text flow');
+  });
+  await check('六组表格行高与独立原生实测相符，区分最小/固定/自动及内边距和边框',async()=>{
+    // Independent oracle: native WPS opened only self-authored, read-only
+    // documents. Paired identical paragraphs yielded these physical advances;
+    // values are not calculated from the implementation being checked.
+    const cases=[
+      {rule:'atLeast',top:60,bottom:60,border:6,advance:60},
+      {rule:'exact',top:60,bottom:60,border:6,advance:55},
+      {rule:'auto',top:60,bottom:60,border:6,advance:29},
+      {rule:'atLeast',top:30,bottom:105,border:12,advance:62},
+      {rule:'exact',top:30,bottom:105,border:12,advance:58},
+      {rule:'auto',top:30,bottom:105,border:12,advance:31},
+    ];
+    const p='<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="300" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:sz w:val="21"/></w:rPr><w:t>Native oracle row</w:t></w:r></w:p>';
+    const tables=cases.map(test=>{
+      const borders=['top','right','bottom','left','insideH','insideV'].map(side=>`<w:${side} w:val="single" w:sz="${test.border}" w:color="000000"/>`).join('');
+      const row=`<w:tr><w:trPr><w:trHeight w:val="${test.rule==='auto'?0:765}" w:hRule="${test.rule}"/></w:trPr><w:tc><w:tcPr><w:vAlign w:val="center"/><w:tcMar><w:top w:w="${test.top}" w:type="dxa"/><w:bottom w:w="${test.bottom}" w:type="dxa"/></w:tcMar></w:tcPr>${p}</w:tc></w:tr>`;
+      return `<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblBorders>${borders}</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>${row}${row}</w:tbl>`;
+    }).join('');
+    const entries=buildWordTableFixtureEntries();entries['word/document.xml']=entries['word/document.xml'].replace(/<w:tbl>[\s\S]*<\/w:tbl>/,tables);
+    await window.wordReport.open(new File([archive(entries)],'self-authored-native-row-oracle.docx',{type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}));
+    const rendered=[...root.querySelectorAll('table')];assert(rendered.length===6,'Not all independent oracle cases rendered.');
+    rendered.forEach((table,index)=>{
+      const paragraphs=[...table.querySelectorAll('.op-word-paragraph')];assert(paragraphs.length===2,'Oracle pair changed.');near(parseFloat(getComputedStyle(paragraphs[0]).lineHeight),20,'Oracle text line height',.1);
+      near(paragraphs[1].getBoundingClientRect().top-paragraphs[0].getBoundingClientRect().top,cases[index].advance,'Native row advance '+index,.25);
+    });
+  });
+  await check('超高浮图依原生参照钳住单元格居中位移，正文和图一起上移且不撑大行',async()=>{
+    // Native independent sample: 38px content floor, 4px cell margins,
+    // 1px collapsed border and 20.8px document grid, image-only run 24px.
+    const sample=async height=>{
+      await window.wordReport.open(anchorFile({stampHeight:height,imageRunSize:36,nativeGrid:true}));
+      const cell=root.querySelector('table').rows[0].cells[0],paragraph=cell.querySelector('.op-word-paragraph'),image=[...root.querySelectorAll('img')][1],box=cell.getBoundingClientRect();
+      return {row:box.height,textTop:paragraph.getBoundingClientRect().top-box.top,imageTop:image.getBoundingClientRect().top-box.top,lineHeight:parseFloat(getComputedStyle(paragraph).lineHeight),align:getComputedStyle(cell).verticalAlign};
+    };
+    const small=await sample(12),large=await sample(99);
+    near(small.row,47,'Small floating image row height',.2);near(large.row,47,'Large floating image row height',.2);near(small.lineHeight,20.8,'Document line grid',.1);
+    near(small.textTop,13.1,'Native centered text top',.2);near(small.textTop-large.textTop,8.6,'Native text movement',.2);near(small.imageTop-large.imageTop,8.6,'Native image movement',.2);
+    assert(small.align==='middle'&&large.align==='top','Oversized anchor did not preserve the small-image alignment case.');
+  });
+  preview.destroy();window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;
+}
+</script></html>

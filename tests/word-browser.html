@@ -1,0 +1,93 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Word layout checks</title><style>body{font:14px/1.6 system-ui;margin:20px;background:#f5f7fb}pre{white-space:pre-wrap}.viewer{width:1200px;height:1500px;margin:20px 0}body.inspect{margin:0}body.inspect>h1,body.inspect>label,body.inspect>#results{display:none}body.inspect #area{height:100vh}body.inspect .viewer{width:100vw;height:100vh;margin:0}</style></head>
+<body><h1>Word 字体、目录与分页验证</h1><label>选择 fixtures/styled.docx：<input id="fixture-files" type="file" multiple accept=".doc,.docx"></label><pre id="results">检查中…</pre><div id="area"></div><script type="module">
+import { OfficePreview } from '../src/index.js';
+import { renderModel } from '../src/render.js';
+import { viewerStyles } from '../src/styles.js';
+const area=document.querySelector('#area'),output=document.querySelector('#results'),results=[];
+const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+const near=(a,b,message,tolerance=2)=>assert(Math.abs(a-b)<=tolerance,`${message}: ${a} != ${b}`);
+const wait=async predicate=>{const end=Date.now()+15000;while(Date.now()<end){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('等待文件或布局完成超时');};
+async function file(name){await wait(()=>document.querySelector('#fixture-files').files.length>0);const selected=[...document.querySelector('#fixture-files').files].find(file=>file.name===name);assert(selected,'缺少本地样本 '+name);return selected;}
+async function withViewer(action){const host=document.createElement('div');host.className='viewer';area.append(host);const preview=new OfficePreview(host),root=host.firstElementChild.shadowRoot;try{await action(preview,root);}finally{preview.destroy();host.remove();}}
+async function check(name,action){try{await action();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}output.textContent=JSON.stringify(results,null,2);}
+async function withWordModel(blocks,action){const host=document.createElement('div');host.className='viewer';area.append(host);const root=host.attachShadow({mode:'open'}),style=document.createElement('style');style.textContent=viewerStyles;const viewport=document.createElement('div'),content=document.createElement('div'),auxiliary=document.createElement('div');viewport.append(content);root.append(style,auxiliary,viewport);const rendered=renderModel({kind:'document',format:'docx',page:{width:400,height:200,marginTop:20,marginRight:20,marginBottom:20,marginLeft:20},blocks},viewport,content,auxiliary);try{await rendered.ready;await action(root);}finally{rendered.dispose();host.remove();}}
+
+if(new URLSearchParams(location.search).has('inspect')){
+  document.body.classList.add('inspect');
+  const host=document.createElement('div');host.className='viewer';area.append(host);
+  const preview=new OfficePreview(host),root=host.firstElementChild.shadowRoot;
+  const captureStyle=document.createElement('style');captureStyle.textContent='.op-viewport{scrollbar-width:none}.op-viewport::-webkit-scrollbar{display:none}';root.append(captureStyle);
+  window.wordPreview={
+    async open(index){
+      const selected=document.querySelector('#fixture-files').files[index];if(!selected)throw new Error('缺少本地文件');
+      const model=await preview.open(selected);preview.setZoom(1);await document.fonts.ready;
+      const papers=[...root.querySelectorAll('.op-paper')],firstImagePageIndex=papers.findIndex(paper=>paper.querySelector('img'));
+      const sampleIndices=[...new Set([0,1,2,firstImagePageIndex].filter(index=>index>=0&&index<papers.length))];
+      const sampled=sampleIndices.flatMap(index=>[...papers[index].querySelectorAll('img')]);
+      for(const image of sampled)image.loading='eager';
+      await Promise.all(sampled.map(image=>image.decode().catch(()=>{})));
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      const paragraph=[...root.querySelectorAll('.op-word-paragraph')].find(node=>node.textContent.trim());
+      const css=paragraph?getComputedStyle(paragraph):null,images=[...root.querySelectorAll('img')];
+      const heights=papers.map(paper=>paper.getBoundingClientRect().height);
+      const overflowPages=papers.flatMap((paper,index)=>paper.dataset.overflow==='true'?[Number(paper.dataset.page)||index+1]:[]);
+      const tocPageNumberRights=[...root.querySelectorAll('.op-word-toc .op-word-page-number')].slice(0,3).map(number=>{const body=number.closest('.op-word-page-body');return body?number.getBoundingClientRect().right-body.getBoundingClientRect().left:null;});
+      return {name:model.name,format:model.format,pageCount:papers.length,modelPage:model.page||null,sections:model.sections?.length||0,blocks:model.blocks?.length||0,tocLeaderCount:root.querySelectorAll('.op-word-tab-leader').length,tocPageNumberCount:root.querySelectorAll('.op-word-page-number').length,overflowPages,maxPaperHeight:heights.length?Math.max(...heights):0,minPaperHeight:heights.length?Math.min(...heights):0,firstPageTocCount:papers[0]?.querySelectorAll('.op-word-toc').length||0,tocPageNumberRights,firstImagePageIndex,imageCount:images.length,sampledImages:sampled.length,failedImages:sampled.filter(image=>!image.naturalWidth).length,titleFont:css?{family:css.fontFamily,size:css.fontSize,color:css.color,lineHeight:css.lineHeight}:null,warnings:model.warnings||[]};
+    },
+    async page(index){const paper=root.querySelectorAll('.op-paper')[index];if(!paper)throw new Error('纸页不存在');paper.scrollIntoView({block:'start',inline:'nearest'});const images=[...paper.querySelectorAll('img')];for(const image of images)image.loading='eager';await Promise.all(images.map(image=>image.decode().catch(()=>{})));await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const box=paper.getBoundingClientRect(),style=getComputedStyle(paper);return {x:box.x,y:box.y,width:box.width,height:box.height,marginTop:style.paddingTop,marginRight:style.paddingRight,marginBottom:style.paddingBottom,marginLeft:style.paddingLeft,paragraphs:paper.querySelectorAll('.op-word-paragraph').length,leaders:paper.querySelectorAll('.op-word-tab-leader').length};},
+    destroy(){preview.destroy();}
+  };
+}else{
+  await check('DOCX 字体与目录标题样式通过继承还原',()=>withViewer(async(preview,root)=>{
+    const model=await preview.open(await file('styled.docx'));
+    const title=[...root.querySelectorAll('.op-word-paragraph')].find(node=>node.textContent.trim()==='目录');
+    assert(title,'目录标题未显示为独立段落');const style=getComputedStyle(title);
+    near(parseFloat(style.fontSize),32*2/3,'标题未继承16pt字号',0.2);
+    assert(style.color==='rgb(47, 117, 181)'&&Number(style.fontWeight)>=600,'标题蓝色或粗体未继承');
+    const toc=[...root.querySelectorAll('.op-word-paragraph')].find(node=>node.textContent.includes('二级目录示例'));
+    const tocStyle=getComputedStyle(toc);near(parseFloat(tocStyle.fontSize),14,'目录未继承10.5pt字号',0.2);assert(tocStyle.fontFamily.includes('宋体'),'目录宋体丢失');
+    assert(model.blocks.some(block=>block.isToc),'DOCX 模型缺少目录标记');
+  }));
+  await check('目录层级缩进、点引导线与右侧缓存页码保留',()=>withViewer(async(preview,root)=>{
+    await preview.open(await file('styled.docx'));
+    const paragraphs=[...root.querySelectorAll('.op-word-paragraph')];
+    const levels=['一、办公文档测试','二级目录示例','三级目录示例'].map(text=>paragraphs.find(node=>node.textContent.includes(text)));
+    assert(levels.every(Boolean),'目录层级文字缺失');
+    const positions=levels.map(node=>node.getBoundingClientRect().left);assert(positions[1]>positions[0]+15&&positions[2]>positions[1]+15,'目录层级没有保留缩进');
+    assert(root.querySelectorAll('.op-word-tab-leader').length>=3,'右对齐制表位没有绘制点引导线');
+    const numbers=levels.map(node=>node.querySelector('.op-word-page-number'));assert(numbers.every(Boolean),'右侧页码未独立定位');
+    assert(numbers.map(node=>node.textContent.trim()).join(',')==='5,12,23','cached页码未保留');
+    const edges=numbers.map(node=>node.getBoundingClientRect().right);near(Math.max(...edges),Math.min(...edges),'不同目录级别的页码右边缘不齐',3);
+    assert(!root.textContent.includes('PAGEREF')&&!root.textContent.includes('TOC \\o'),'域指令被当作正文显示');
+  }));
+  await check('Word 显式分页生成独立纸页且不产生空白首尾页',()=>withViewer(async(preview,root)=>{
+    await preview.open(await file('styled.docx'));const papers=[...root.querySelectorAll('.op-paper')];
+    assert(papers.length>=3,'pageBreakBefore或inline分页没有形成独立纸页');
+    const contents=papers.map(paper=>paper.textContent);assert(contents[0].includes('目录')&&!contents[0].includes('正文第一页'),'页前分页未生效');
+    const before=contents.findIndex(text=>text.includes('显式分页前')),after=contents.findIndex(text=>text.includes('显式分页后'));
+    assert(before>=1&&after>before,'段内分页两侧仍在同一纸页');
+    assert(contents[0].trim()&&contents.at(-1).trim(),'产生了空白首尾页');
+    near(parseFloat(getComputedStyle(papers[0]).width),11906/15,'A4纸宽未保留',2);
+  }));
+  await check('分页后仍保留图片、表格、字符样式与自动编号',()=>withViewer(async(preview,root)=>{
+    const model=await preview.open(await file('styled.docx'));
+    const image=root.querySelector('.op-paper img');assert(image?.getAttribute('src')?.startsWith('blob:'),'内嵌图片丢失');image.loading='eager';image.scrollIntoView({block:'center',inline:'nearest'});await image.decode();assert(image.complete&&image.naturalWidth===8&&image.naturalHeight===4,'图片内容未解码');
+    const table=root.querySelector('.op-paper table');assert(table?.querySelectorAll('tr').length===2&&table.textContent.includes('不是用户资料'),'普通表格内容丢失');
+    const emphasis=[...root.querySelectorAll('.op-word-paragraph span')].find(node=>node.textContent==='字符样式继承');assert(emphasis,'字符样式内容丢失');const style=getComputedStyle(emphasis);assert(style.fontStyle==='italic'&&style.color==='rgb(192, 80, 77)','字符样式没有继承');
+    const numbered=model.blocks.find(block=>block.numberingLabel);assert(numbered&&numbered.numberingLabel.includes('1'),'自动编号模型缺失');
+    const rendered=[...root.querySelectorAll('.op-word-paragraph')].find(node=>node.textContent.includes('编号列表项目'));assert(rendered&&rendered.textContent.includes('1'),'自动编号没有显示');
+  }));
+  await check('同一编号段落跨页后不重复列表前缀',()=>withWordModel([
+    {type:'paragraph',numberingLabel:'1.',numberingSuffix:'space',runs:[{text:'Before break'},{type:'pageBreak',text:'\f'},{text:'Continued text'}]}
+  ],async root=>{const pages=[...root.querySelectorAll('.op-paper')];assert(pages.length===2,'段内分页未形成两页');assert(pages[0].textContent.startsWith('1.'),'首页编号丢失');assert(pages[1].textContent==='Continued text','续页重复了编号或改变正文');}));
+  await check('keepNext标题与后续正文一起移动，避免孤立页尾标题',()=>withWordModel([
+    {type:'paragraph',lineHeight:40,runs:[{text:'First line\nSecond line\nThird line'}]},
+    {type:'paragraph',lineHeight:40,keepNext:true,runs:[{text:'Keep heading'}]},
+    {type:'paragraph',lineHeight:40,runs:[{text:'Following body'}]}
+  ],async root=>{const pages=[...root.querySelectorAll('.op-paper')];assert(pages.length===2,'自动分页结果异常');assert(!pages[0].textContent.includes('Keep heading'),'标题被留在第一页末尾');assert(pages[1].textContent.includes('Keep heading')&&pages[1].textContent.includes('Following body'),'标题与正文没有一起移动');}));
+  await check('内容进入底部页边距时不把原始纸张高度额外撑大',()=>withWordModel([
+    {type:'paragraph',lineHeight:180,runs:[{text:'Tall inline line'}]}
+  ],async root=>{const paper=root.querySelector('.op-paper');near(paper.getBoundingClientRect().height,200,'物理纸高被padding撑大',0.2);assert(!paper.dataset.overflow,'整张纸内的内容被误报为超页');}));
+  window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);
+}
+</script></body></html>

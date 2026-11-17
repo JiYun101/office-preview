@@ -1,0 +1,4 @@
+This is the SwiftPM template resource directory.
+Run node scripts/package-macos.mjs from the SDK checkout, then build the generated
+artifacts/macos/OfficePreviewMac directory on a Mac. The packager copies the local
+SDK assets here; documents, fixtures and tests are never copied into WebAssets.

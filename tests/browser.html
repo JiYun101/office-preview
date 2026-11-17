@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Office SDK 浏览器验证</title>
+<style>body{font:15px/1.7 system-ui;margin:32px;background:#f6f4ef;color:#173f3b}pre{white-space:pre-wrap;padding:24px;background:white;border:1px solid #d7ddd6;border-radius:12px}.failed{color:#9b2c2c}</style>
+<h1>Office SDK 浏览器验证</h1>
+<p>使用自产开发样本验证真实浏览器解析链路；结果不代表复杂真实 Office 文件兼容验收。</p>
+<pre id="results">验证中…</pre>
+<script type="module">
+import { parseOoxml } from '../src/parsers/ooxml.js';
+import { parseLegacy } from '../src/parsers/legacy.js';
+import { parseCsv } from '../src/parsers/csv.js';
+
+const results = [];
+const output = document.querySelector('#results');
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+async function bytes(name) {
+  const response = await fetch(`../fixtures/${name}?raw=1`);
+  if (!response.ok) throw new Error(`无法加载 ${name}: ${response.status}`);
+  const data = new Uint8Array(await response.arrayBuffer());
+  assert(data.byteLength > 0, `样本 HTTP 响应为空：${name}`);
+  return data;
+}
+const text = (runs) => (runs || []).map(run => run.text || '').join('');
+async function check(name, run) {
+  try { await run(); results.push({ name, passed: true }); }
+  catch (error) { results.push({ name, passed: false, error: error.stack || error.message }); }
+  output.textContent = JSON.stringify(results, null, 2);
+}
+
+await check('DOCX：中文、直接格式、表格、关系图片与页面尺寸', async () => {
+  const model = await parseOoxml(await bytes('sample.docx'), 'docx');
+  assert(model.kind === 'document', 'DOCX 未返回文档模型');
+  const title = model.blocks.find(block => block.type === 'paragraph');
+  assert(text(title.runs).includes('自主研发 Office 预览套件'), 'DOCX 中文标题丢失');
+  assert(title.runs.some(run => run.bold), 'DOCX 直接加粗丢失');
+  assert(model.blocks.some(block => block.type === 'table' && block.rows.length === 2), 'DOCX 表格丢失');
+  assert(model.blocks.some(block => block.type === 'paragraph' && block.runs.some(run => run.image?.bytes.length)), 'DOCX 图片关系丢失');
+  assert(model.page.width > 790 && model.page.width < 800, 'DOCX A4 页宽不正确');
+  assert(model.warnings.length > 0, 'DOCX 基础还原能力需明确限制');
+});
+
+await check('XLSX：共享字符串、缓存公式、格式、合并与多工作表', async () => {
+  const model = await parseOoxml(await bytes('sample.xlsx'), 'xlsx');
+  assert(model.kind === 'spreadsheet' && model.sheets.length === 2, 'XLSX 工作表数量不正确');
+  const sheet = model.sheets[0];
+  assert(sheet.name === '产品清单', 'XLSX 中文工作表名称丢失');
+  assert(sheet.rows[2][0].value === '自研内核', 'XLSX 富文本共享字符串丢失');
+  assert(sheet.rows[2][3].value === 1206 && sheet.rows[2][3].formula === 'B3*C3', 'XLSX 缓存公式不正确');
+  assert(sheet.rows[1][0].style?.bold === true, 'XLSX 单元格字体格式丢失');
+  assert(sheet.merges.some(merge => merge.startRow === 0 && merge.endCol === 3), 'XLSX 合并范围不正确');
+  assert(sheet.rows[3][1].value === true, 'XLSX 布尔值不正确');
+});
+
+await check('PPTX：按关系顺序读取页面、尺寸、文本位置与形状', async () => {
+  const model = await parseOoxml(await bytes('sample.pptx'), 'pptx');
+  assert(model.kind === 'presentation' && model.slides.length === 2, 'PPTX 页面数量不正确');
+  assert(model.width === 1280 && model.height === 720, 'PPTX 页面比例不正确');
+  assert(model.slides[0].elements.some(element => element.type === 'text' && text(element.runs).includes('Office，嵌入你的软件')), 'PPTX 首屏文字不正确');
+  assert(model.slides[0].elements.some(element => element.type === 'shape'), 'PPTX 基础形状丢失');
+  assert(model.slides[1].elements.some(element => element.x > 0 && element.width > 0), 'PPTX 元素坐标丢失');
+});
+
+await check('OOXML：扩展名与内容不匹配时拒绝加载', async () => {
+  let rejected = false;
+  try { await parseOoxml(await bytes('sample.docx'), 'xlsx'); }
+  catch { rejected = true; }
+  assert(rejected, '错误扩展名被当成成功');
+});
+
+for (const format of ['doc', 'xls', 'ppt']) {
+  await check(`${format.toUpperCase()}：浏览器读取二进制基础子集`, async () => {
+    const model = parseLegacy(await bytes(`sample.${format}`), format);
+    if (format === 'doc') assert(model.blocks.some(block => text(block.runs).includes('中文正文')), 'DOC 中文正文丢失');
+    if (format === 'xls') assert(model.sheets[0].rows[1][2].value === 1280.5, 'XLS 数值丢失');
+    if (format === 'ppt') assert(model.slides.length === 2 && !JSON.stringify(model).includes('ORPHAN DELETED'), 'PPT 当前页筛选不正确');
+  });
+}
+
+await check('CSV：UTF-16 BOM 与分隔符检测', async () => {
+  const model = parseCsv(await bytes('sample-utf16.csv'));
+  assert(model.sheets[0].rows[1][0].value === '中文编码' && model.delimiter === '\t', 'CSV 编码或分隔符错误');
+});
+
+const passed = results.every(result => result.passed);
+document.documentElement.dataset.status = passed ? 'passed' : 'failed';
+document.title = `${passed ? 'PASS' : 'FAIL'} ${results.filter(result => result.passed).length}/${results.length} · Office SDK`;
+output.className = passed ? '' : 'failed';
+output.textContent = JSON.stringify({ passed, tests: results.length, results }, null, 2);
+window.officeBrowserTestResults = { passed, results };
+</script>
+</html>

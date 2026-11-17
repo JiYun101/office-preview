@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Office SDK 集成验证</title>
+  <style>
+    body { margin: 28px; background: #f6f4ef; color: #173f3b; font: 14px/1.7 system-ui, sans-serif; }
+    h1 { font-size: 24px; }
+    pre { padding: 20px; border: 1px solid #d7ddd6; border-radius: 12px; background: white; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .fixture-viewer { width: min(100%, 1080px); height: 560px; margin: 16px 0; border: 1px solid #b8c8c1; }
+    iframe { width: min(100%, 1080px); height: 400px; border: 1px solid #b8c8c1; }
+    .failed { color: #9b2c2c; }
+  </style>
+</head>
+<body>
+  <h1>Office SDK 集成验证</h1>
+  <p>直接调用 SDK、工作线程与 iframe 消息协议；使用自产开发样本，不代表复杂真实 Office 文件的兼容性验收。</p>
+  <pre id="results">验证中…</pre>
+  <div id="test-area"></div>
+  <script type="module">
+    import { OfficePreview } from '../src/index.js';
+    import { renderModel } from '../src/render.js';
+
+    const area = document.querySelector('#test-area');
+    const output = document.querySelector('#results');
+    const results = [];
+    const assert = (condition, message) => { if (!condition) throw new Error(message); };
+    const frameTick = () => new Promise(resolve => requestAnimationFrame(resolve));
+    const waitUntil = async predicate => { const end=Date.now()+10000; while(Date.now()<end){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));} throw new Error('等待滚动内容超时'); };
+    const slideAt = async (root,index) => {const slot=root.querySelectorAll('.op-slide-page')[index];assert(slot,'幻灯片位置缺失');slot.scrollIntoView({block:'start'});await waitUntil(()=>slot.dataset.ready==='true');return slot;};
+    const rootOf = container => {
+      const root = container.firstElementChild?.shadowRoot;
+      assert(root, 'SDK 没有创建可访问的 Shadow DOM');
+      return root;
+    };
+    const visibleContent = root => root.querySelector('.op-content')?.textContent || '';
+    const byButton = (root, label) => Array.from(root.querySelectorAll('button')).find(button => button.textContent.trim() === label);
+
+    async function fixture(name) {
+      const response = await fetch(`../fixtures/${name}?raw=1`);
+      if (!response.ok) throw new Error(`无法加载样本 ${name}：HTTP ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      if (!buffer.byteLength) throw new Error(`样本 ${name} 返回空内容：HTTP ${response.status}`);
+      return new File([buffer], name);
+    }
+
+    async function withViewer(run) {
+      const container = document.createElement('div');
+      container.className = 'fixture-viewer';
+      area.append(container);
+      const viewer = new OfficePreview(container);
+      try { return await run(viewer, rootOf(container), container); }
+      finally { viewer.destroy(); container.remove(); }
+    }
+
+    function timeout(promise, label, milliseconds = 15000) {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} 超时`)), milliseconds); }),
+      ]).finally(() => clearTimeout(timer));
+    }
+
+    async function check(name, run) {
+      try {
+        await timeout(Promise.resolve().then(run), name);
+        results.push({ name, ok: true });
+      } catch (error) {
+        results.push({ name, ok: false, error: error.stack || error.message || String(error) });
+      }
+      output.textContent = JSON.stringify({ completed: results.length, results }, null, 2);
+    }
+
+    async function openFixture(viewer, name) {
+      let loaded = null;
+      const onLoad = event => { loaded = event.detail; };
+      viewer.addEventListener('load', onLoad, { once: true });
+      try {
+        const model = await viewer.open(await fixture(name));
+        assert(viewer.getDocument() === model, 'getDocument() 未返回最近打开的模型');
+        assert(loaded === model, 'SDK load 事件缺失或模型不一致');
+        assert(model.name === name, 'File 文件名未保留');
+        return model;
+      } finally { viewer.removeEventListener('load', onLoad); }
+    }
+
+    await check('CSV：File → Worker → SDK → 中文表格', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample.csv');
+      assert(model.kind === 'spreadsheet' && model.format === 'csv', 'CSV 文档类型不正确');
+      assert(visibleContent(root).includes('自研内核'), 'CSV 中文单元格没有渲染');
+      assert(visibleContent(root).includes('支持逗号,和双引号"示例"'), 'CSV 引号与逗号没有保留');
+      assert(root.querySelector('.op-grid tbody td'), 'CSV 没有渲染为表格');
+    }));
+
+    await check('UTF-16 CSV：通过 File 与 Worker 保留中文和制表符', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample-utf16.csv');
+      assert(model.delimiter === '\t', 'UTF-16 CSV 分隔符错误');
+      assert(visibleContent(root).includes('中文编码'), 'UTF-16 中文内容丢失');
+      assert(model.sheets[0].rows[1][1].value === '12', 'CSV 值被错误转换');
+    }));
+
+    await check('DOCX：通过 File 与 Worker 渲染文字、表格和内嵌图片', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample.docx');
+      assert(model.kind === 'document', 'DOCX 文档类型不正确');
+      const paper = root.querySelector('.op-paper');
+      assert(paper?.textContent.includes('自主研发 Office 预览套件'), 'DOCX 正文没有渲染');
+      assert(paper.querySelectorAll('table tr').length === 2, 'DOCX 表格行数不正确');
+      assert(paper.querySelector('img[src^="blob:"]'), 'DOCX 内嵌图片没有通过本地 Blob 渲染');
+      assert(model.warnings.length > 0 && !root.querySelector('.op-warning'), '兼容提示应交给宿主，不占用极简预览区');
+    }));
+
+    await check('XLSX：切换工作表、点击单元格查看缓存公式', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample.xlsx');
+      assert(model.sheets.length === 2, 'XLSX 工作表数量不正确');
+      const formulaCell = root.querySelector('td[title^="D3:"]');
+      assert(formulaCell?.textContent === '1206', 'XLSX 公式缓存值没有渲染');
+      formulaCell.click();
+      assert(formulaCell.classList.contains('op-selected'), '单元格选中状态缺失');
+      assert(formulaCell.title.includes('=B3*C3'), '单元格提示缺少缓存公式');
+      assert(formulaCell.title.includes('1206') && !root.querySelector('.op-formula'), '缓存值提示或极简界面不正确');
+      const tabs = Array.from(root.querySelectorAll('[role="tab"]'));
+      assert(tabs.length === 2, 'XLSX 工作表标签缺失');
+      tabs[1].click();
+      assert(tabs[1].getAttribute('aria-selected') === 'true', 'XLSX 工作表选中状态没有更新');
+      assert(visibleContent(root).includes('这不是复杂真实文件的兼容验收。'), 'XLSX 第二个工作表没有显示');
+      tabs[0].click();
+      assert(root.querySelector('td[colspan="4"]')?.textContent === 'Office 预览开发样本', 'XLSX 合并单元格没有显示');
+    }));
+
+    await check('PPTX：真实打开并连续滚动读取所有幻灯片', () => withViewer(async (viewer, root) => {
+      const model=await openFixture(viewer,'sample.pptx');
+      assert(model.slides.length===2 && root.querySelectorAll('.op-slide-page').length===2,'PPTX没有完整页序');
+      assert((await slideAt(root,0)).textContent.includes('Office，嵌入你的软件'),'PPTX第一页没有渲染');
+      assert((await slideAt(root,1)).textContent.includes('真实读取基础结构'),'PPTX滚动末页失败');
+      assert(!byButton(root,'下一页')&&!root.querySelector('.op-slide-list'),'PPTX仍保留分页UI');
+    }));
+
+    await check('DOC：File 与 Worker 解析旧格式中文正文并渲染', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample.doc');
+      assert(model.kind === 'document', 'DOC 文档类型错误');
+      assert(root.querySelector('.op-paper')?.textContent.includes('这是旧版 DOC 中文正文。'), 'DOC 中文正文没有渲染');
+    }));
+
+    await check('XLS：File 与 Worker 解析旧格式中文和数值', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample.xls');
+      assert(model.kind === 'spreadsheet', 'XLS 文档类型错误');
+      assert(visibleContent(root).includes('自研解析') && visibleContent(root).includes('1280.5'), 'XLS 中文或数值没有渲染');
+    }));
+
+    await check('PPT：File 与 Worker 读取当前页面并渲染旧格式文本', () => withViewer(async (viewer, root) => {
+      const model = await openFixture(viewer, 'sample.ppt');
+      assert(model.slides.length === 2, 'PPT 当前幻灯片数量错误');
+      assert((await slideAt(root,0)).textContent.includes('旧版 PPT 中文文本'), 'PPT 中文文本没有显示');
+      assert(!visibleContent(root).includes('ORPHAN DELETED'), 'PPT 显示了未引用的已删幻灯片');
+      assert((await slideAt(root,1)).textContent.includes('Local parsing'), 'PPT滚动第二页没有显示');
+    }));
+
+    await check('不支持的扩展名：Promise 拒绝、错误事件和错误界面', () => withViewer(async (viewer, root) => {
+      let errorEvent = null;
+      viewer.addEventListener('error', event => { errorEvent = event.detail; }, { once: true });
+      let rejected = null;
+      try { await viewer.open(new File(['unimplemented'], 'unsupported.vsdx')); }
+      catch (error) { rejected = error; }
+      assert(rejected && /vsdx/.test(rejected.message), '不支持格式没有明确拒绝');
+      assert(errorEvent === rejected, 'SDK error 事件缺失或错误不一致');
+      assert(root.querySelector('.op-error')?.textContent.includes('暂时无法预览此文件'), '错误界面没有展示');
+      assert(viewer.getDocument() === null, '失败打开后仍暴露过期文档模型');
+    }));
+
+    await check('快速连续打开：前一个请求以 AbortError 结束，保留最新文档', () => withViewer(async (viewer, root) => {
+      const first = viewer.open(new TextEncoder().encode('name,value\nOLD_ONLY,1'), { name: 'old.csv' })
+        .then(() => ({ unexpectedSuccess: true }), error => error);
+      const latest = await viewer.open(new TextEncoder().encode('name,value\nLATEST_ONLY,2'), { name: 'latest.csv' });
+      const cancelled = await first;
+      assert(cancelled.name === 'AbortError', '前一个打开请求没有以 AbortError 取消');
+      assert(viewer.getDocument() === latest && latest.name === 'latest.csv', '最新文档模型被旧请求覆盖');
+      assert(visibleContent(root).includes('LATEST_ONLY') && !visibleContent(root).includes('OLD_ONLY'), '快速打开后显示了旧内容');
+    }));
+
+    await check('缩放与销毁：公开 API 更新状态，销毁后拒绝再次打开', () => withViewer(async (viewer, root, container) => {
+      await openFixture(viewer, 'sample.csv');
+      viewer.setZoom(1.25);
+      assert(root.querySelector('.op-scale')?.textContent === '125%', 'setZoom 没有更新缩放状态');
+      viewer.setZoom(99);
+      assert(root.querySelector('.op-scale')?.textContent === '300%', '缩放上限未约束');
+      viewer.destroy();
+      assert(container.children.length === 0 && viewer.getDocument() === null, 'destroy 没有清除 DOM 和文档');
+      let rejected = null;
+      try { await viewer.open(new File(['a,b'], 'after-destroy.csv')); }
+      catch (error) { rejected = error; }
+      assert(rejected && /销毁/.test(rejected.message), '已销毁实例仍允许打开文件');
+    }));
+
+    await check('销毁正在打开的实例：待完成请求以 AbortError 结束', () => withViewer(async (viewer, root, container) => {
+      const pending = viewer.open(new TextEncoder().encode('a,b\n1,2'), { name: 'pending.csv' })
+        .then(() => ({ unexpectedSuccess: true }), error => error);
+      viewer.destroy();
+      const result = await pending;
+      assert(result.name === 'AbortError', '销毁没有取消解析请求');
+      assert(container.children.length === 0, '销毁后仍有预览 DOM');
+    }));
+
+    await check('不可克隆 options：终止失败 Worker，随后可再次打开文件', () => withViewer(async (viewer, root) => {
+      const NativeWorker = window.Worker;
+      const created = [];
+      const terminated = new Set();
+      window.Worker = class TrackedWorker extends NativeWorker {
+        constructor(...args) { super(...args); created.push(this); }
+        terminate() { terminated.add(this); return super.terminate(); }
+      };
+      try {
+        let rejected = null;
+        try { await viewer.open(new File(['a,b\n1,2'], 'clone-error.csv'), { cannotClone: () => {} }); }
+        catch (error) { rejected = error; }
+        assert(rejected?.name === 'DataCloneError', '不可克隆 options 没有以 DataCloneError 拒绝');
+        assert(created.length === 1 && terminated.has(created[0]), 'postMessage 失败后 Worker 没有立即终止');
+        assert(root.querySelector('.op-error'), '不可克隆 options 没有展示错误界面');
+        await openFixture(viewer, 'sample.csv');
+        assert(visibleContent(root).includes('自研内核'), '克隆失败后实例无法恢复打开');
+        assert(created.length === 2 && created.every(worker => terminated.has(worker)), '后续成功打开的 Worker 没有清理');
+      } finally {
+        window.Worker = NativeWorker;
+        // Keep a failed resource-cleanup assertion from leaking a test Worker.
+        for (const worker of created) if (!terminated.has(worker)) worker.terminate();
+      }
+    }));
+
+    await check('超 32MiB Blob：读取 arrayBuffer 前拒绝', () => withViewer(async (viewer, root) => {
+      let reads = 0;
+      class OversizedBlob extends Blob {
+        get size() { return 32 * 1024 * 1024 + 1; }
+        async arrayBuffer() { reads++; throw new Error('测试失败：过大 Blob 被读取'); }
+      }
+      let rejected = null;
+      try { await viewer.open(new OversizedBlob(['unread']), { name: 'oversized.csv' }); }
+      catch (error) { rejected = error; }
+      assert(rejected && /32\s*MB/i.test(rejected.message), '过大 Blob 没有明确按容量限制拒绝');
+      assert(reads === 0, 'SDK 在检查 Blob 大小前读取了 arrayBuffer');
+      assert(root.querySelector('.op-error'), '过大 Blob 没有展示错误界面');
+    }));
+
+    await check('跨窗口合并 A1:A500：滚动末行保留源值和源地址', async () => {
+      const container=document.createElement('div');container.className='fixture-viewer';
+      const viewport=document.createElement('div'),content=document.createElement('div'),auxiliary=document.createElement('div');
+      Object.assign(viewport.style,{height:'400px',overflow:'auto',position:'relative'});viewport.append(content);container.append(auxiliary,viewport);area.append(container);
+      let rendered;
+      try{
+        rendered=renderModel({kind:'spreadsheet',sheets:[{name:'合并',rows:[[{value:'跨500行合并原文'}]],merges:[{startRow:0,startCol:0,endRow:499,endCol:0}]}]},viewport,content,auxiliary);
+        assert(!container.querySelector('.op-data-controls'),'仍有分段按钮');
+        assert(content.querySelector('tbody td')?.textContent==='跨500行合并原文','起始合并格原文丢失');
+        viewport.scrollTop=viewport.scrollHeight;await waitUntil(()=>content.querySelector('tbody th')?.textContent==='500'||Number(content.querySelector('tbody th')?.textContent)>450);
+        const cell=content.querySelector('tbody td');assert(cell?.textContent==='跨500行合并原文'&&cell.title.startsWith('A1:'),'末端合并格没有保留源值和地址');
+        assert(content.querySelectorAll('tbody tr').length<100,'合并尾部创建了全部500行');
+      }finally{rendered?.dispose();container.remove();}
+    });
+
+    await check('CSV 内容安全：脚本、HTML 和公式作为文字显示', () => withViewer(async (viewer, root) => {
+      window.__officeSdkXss = 0;
+      const scriptText = '<scr' + 'ipt>parent.__officeSdkXss=1</scr' + 'ipt>';
+      const imageText = '<img src=x onerror="parent.__officeSdkXss=2">';
+      const formulaText = '=HYPERLINK("javascript:alert(1)")';
+      const field = value => '"' + value.replaceAll('"', '""') + '"';
+      const csv = '类型,内容\n脚本,' + field(scriptText) + '\n图片,' + field(imageText) + '\n公式,' + field(formulaText);
+      await viewer.open(new File([csv], 'untrusted.csv'));
+      const table = root.querySelector('.op-grid');
+      const cellTexts = Array.from(table.querySelectorAll('td')).map(cell => cell.textContent);
+      assert(cellTexts.includes(scriptText) && cellTexts.includes(imageText) && cellTexts.includes(formulaText), 'CSV 原始文本被修改或解释');
+      assert(!table.querySelector('script,img,iframe,svg'), 'CSV 内容被创建为活动 HTML 元素');
+      await frameTick();
+      assert(window.__officeSdkXss === 0, 'CSV 内容中的脚本发生执行');
+      delete window.__officeSdkXss;
+    }));
+
+    await check('iframe：同源 ready / open / loaded 协议与来源校验', async () => {
+      const embedded = document.createElement('iframe');
+      embedded.name = `sdk-embed-${Date.now()}`;
+      embedded.title = 'Office SDK iframe 集成验证';
+      embedded.src = `../embed.html?parentOrigin=${encodeURIComponent(location.origin)}`;
+      let attacker = null;
+      let messageObserver = null;
+      const embeddedRoot = () => embedded.contentDocument.querySelector('#viewer').firstElementChild?.shadowRoot;
+      function receive(type, requestId) {
+        return timeout(new Promise(resolve => {
+          const listen = event => {
+            if (event.source !== embedded.contentWindow || event.origin !== location.origin) return;
+            if (event.data?.type !== type || (requestId && event.data.requestId !== requestId)) return;
+            window.removeEventListener('message', listen);
+            resolve(event.data);
+          };
+          window.addEventListener('message', listen);
+        }), `iframe ${type}`);
+      }
+      try {
+        const ready = receive('office-preview:ready');
+        area.append(embedded);
+        await ready;
+        const requestId = 'sdk-iframe-trusted';
+        const loaded = receive('office-preview:loaded', requestId);
+        const file = await fixture('sample.csv');
+        const buffer = await file.arrayBuffer();
+        embedded.contentWindow.postMessage({ type: 'office-preview:open', requestId, buffer, name: file.name }, location.origin, [buffer]);
+        const result = await loaded;
+        assert(result.name === 'sample.csv' && result.format === 'csv' && Array.isArray(result.warnings), 'iframe loaded 结果不正确');
+        assert(embeddedRoot()?.querySelector('.op-grid')?.textContent.includes('自研内核'), 'iframe 没有渲染收到的文件');
+
+        // Test the origin branch with a synthetic received message. A rejected
+        // request must not even change the synchronous loading filename.
+        const originalName = embeddedRoot().querySelector('.op-shell').getAttribute('aria-label');
+        embedded.contentWindow.dispatchEvent(new embedded.contentWindow.MessageEvent('message', {
+          origin: 'https://untrusted.invalid', source: window,
+          data: { type: 'office-preview:open', requestId: 'wrong-origin', buffer: new TextEncoder().encode('a,b').buffer, name: 'WRONG_ORIGIN.csv' },
+        }));
+        assert(embeddedRoot().querySelector('.op-shell').getAttribute('aria-label') === originalName, 'iframe 接受了错误 origin 的消息');
+
+        // Send an actual same-origin message from a sibling iframe. The SDK
+        // listener was registered first; our observer sees whether it started
+        // loading before this message finished dispatching.
+        attacker = document.createElement('iframe');
+        attacker.title = '消息来源隔离验证';
+        attacker.hidden = true;
+        const attackerReady = new Promise(resolve => attacker.addEventListener('load', resolve, { once: true }));
+        attacker.src = 'about:blank';
+        area.append(attacker);
+        await attackerReady;
+        const siblingObserved = new Promise(resolve => {
+          messageObserver = event => {
+            if (event.data?.requestId !== 'same-origin-sibling') return;
+            resolve({
+              origin: event.origin,
+              fromSibling: event.source === attacker.contentWindow,
+              name: embeddedRoot().querySelector('.op-shell').getAttribute('aria-label'),
+            });
+          };
+          embedded.contentWindow.addEventListener('message', messageObserver);
+        });
+        const launch = attacker.contentDocument.createElement('script');
+        launch.textContent = `parent.frames[${JSON.stringify(embedded.name)}].postMessage({type:'office-preview:open',requestId:'same-origin-sibling',buffer:new TextEncoder().encode('a,b').buffer,name:'WRONG_SOURCE.csv'},${JSON.stringify(location.origin)});`;
+        attacker.contentDocument.body.append(launch);
+        const observed = await timeout(siblingObserved, '同源兄弟 iframe 消息');
+        assert(observed.origin === location.origin && observed.fromSibling, '未真正发送同源不同 source 消息');
+        assert(observed.name === originalName, 'iframe 接受了非 parent 窗口发来的消息');
+      } finally {
+        if (messageObserver) embedded.contentWindow?.removeEventListener('message', messageObserver);
+        attacker?.remove();
+        embedded.remove();
+      }
+    });
+
+    const passed = results.every(result => result.ok);
+    window.officeBrowserTestResults = { passed, total: results.length, results };
+    document.documentElement.dataset.status = passed ? 'pass' : 'fail';
+    document.title = `${passed ? 'PASS' : 'FAIL'} ${results.filter(result => result.ok).length}/${results.length} · Office SDK 集成验证`;
+    output.className = passed ? '' : 'failed';
+    output.textContent = JSON.stringify(window.officeBrowserTestResults, null, 2);
+  </script>
+</body>
+</html>

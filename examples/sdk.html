@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Office Preview · 直接 SDK 嵌入示例</title>
+  <style>
+    *{box-sizing:border-box}html,body{height:100%;margin:0}body{display:flex;flex-direction:column;background:#f2f4f7;color:#34415b;font:13px/1.5 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}header{display:flex;align-items:center;gap:16px;padding:10px 16px;background:#fff;border-bottom:1px solid #e1e6ef;flex-wrap:wrap}strong{font-weight:600}a{color:#5368d4;text-decoration:none}input{font:inherit;max-width:280px}input::file-selector-button{font:inherit;padding:5px 10px;background:#f6f8fc;border:1px solid #dce2ec;border-radius:5px;color:#4d5d78;cursor:pointer}#status{margin-left:auto;color:#728096;overflow-wrap:anywhere}#preview{flex:1;min-height:0}a:focus-visible,input:focus-visible{outline:2px solid #5368d4;outline-offset:3px}@media(max-width:650px){header{gap:10px}#status{margin-left:0;width:100%}}
+  </style>
+</head>
+<body>
+  <header><a href="./iframe.html">← iframe 示例</a><strong>宿主文件栏</strong><input id="file" aria-label="选择预览文件" type="file" accept=".csv,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.tsv,.txt,.pdf,.eml,.msg"><span id="status" role="status" aria-live="polite">选择本地文件</span></header>
+  <div id="preview"></div>
+  <script type="module">
+    import { OfficePreview } from '../src/index.js';
+
+    // Mount inside the host app's preview panel; open accepts the host's File.
+    const preview = new OfficePreview(document.querySelector('#preview'));
+    // await preview.open(file);
+
+    const input = document.querySelector('#file'), status = document.querySelector('#status');
+    let requestId = 0;
+    input.onchange = async () => {
+      const file = input.files[0]; if (!file) return;
+      const id = ++requestId; input.value = ''; status.textContent = '正在解析…'; status.title = '';
+      try {
+        const model = await preview.open(file);
+        if (id !== requestId) return;
+        status.textContent = `已读取 ${model.name}${model.warnings.length ? ` · ${model.warnings.length} 项兼容提示` : ''}`;
+        status.title = model.warnings.join('\n');
+      } catch (error) { if (id === requestId && error.name !== 'AbortError') status.textContent = error.message; }
+    };
+    window.addEventListener('pagehide', () => preview.destroy());
+  </script>
+</body>
+</html>

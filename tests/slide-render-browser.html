@@ -1,0 +1,44 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>Slide paint and type checks</title><style>body{font:14px/1.6 system-ui;margin:20px}pre{white-space:pre-wrap}.viewer{width:900px;height:500px}</style></head><body><h1>渐变、描边与文字布局验证</h1><pre id="results">检查中…</pre><div id="area"></div><script type="module">
+import { renderModel } from '../src/render.js';
+import { viewerStyles } from '../src/styles.js';
+const results=[],area=document.querySelector('#area'),output=document.querySelector('#results');
+const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+const near=(a,b,message)=>assert(Math.abs(a-b)<0.2,`${message}: ${a} != ${b}`);
+async function check(name,action){try{await action();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}}
+async function withSlide(elements,action){const host=document.createElement('div');host.className='viewer';area.append(host);const root=host.attachShadow({mode:'open'}),style=document.createElement('style');style.textContent=viewerStyles;const viewport=document.createElement('div'),content=document.createElement('div'),auxiliary=document.createElement('div');viewport.append(content);root.append(style,auxiliary,viewport);const rendered=renderModel({kind:'presentation',format:'pptx',width:800,height:400,slides:[{elements}]},viewport,content,auxiliary);try{await rendered.ready;await action(root);}finally{rendered.dispose();host.remove();}}
+
+await check('线性渐变的停靠色与字距被传入实际渲染，字符推进宽度增大',()=>withSlide([
+  {type:'shape',shape:'rect',x:0,y:0,width:800,height:8,fillPaint:{type:'linear',angle:0,scaled:true,stops:[{offset:0,color:'#FF0000'},{offset:1,color:'#00FFFF'}]}},
+  {type:'text',x:20,y:30,width:700,height:80,paragraphs:[{runs:[{text:'ABC',fontSize:24,fontFamily:'Arial',letterSpacing:4}]}]}
+],async root=>{
+  const gradient=getComputedStyle(root.querySelector('.op-slide-shape')).backgroundImage;
+  assert(gradient.includes('linear-gradient')&&gradient.includes('srgb-linear'),'渐变没有使用真实颜色停靠进行绘制');
+  const run=root.querySelector('.op-slide-text span'),spaced=run.getBoundingClientRect().width;
+  near(parseFloat(getComputedStyle(run).letterSpacing),4,'字距丢失');
+  run.style.letterSpacing='0';const plain=run.getBoundingClientRect().width;
+  assert(spaced-plain>8,'字距字段没有改变真实字符推进宽度');
+}));
+
+await check('图形描边以轮廓为中心，圆角来自文件并保持原几何尺寸',()=>withSlide([
+  {type:'shape',shape:'roundRect',x:30,y:40,width:200,height:80,fill:'#123456',stroke:'#ABCDEF',strokeWidth:2,cornerRadius:4}
+],async root=>{
+  const box=root.querySelector('.op-slide-shape'),shape=box.querySelector('svg rect');
+  near(parseFloat(getComputedStyle(box).borderRadius),4,'使用了写死圆角');
+  near(box.getBoundingClientRect().width,200,'描边改变了图形外框宽度');
+  assert(shape&&shape.isPointInStroke({x:-0.5,y:40}),'左侧描边没有延伸到几何轮廓外半边');
+  assert(shape.isPointInStroke({x:0.5,y:40}),'左侧描边没有延伸到几何轮廓内半边');
+  assert(!shape.isPointInStroke({x:2,y:40}),'描边宽度大于文件声明');
+}));
+
+await check('百分比行距按正常行高计算两行基线推进，并保留显式裁剪',()=>withSlide([
+  {type:'text',x:20,y:20,width:500,height:12,verticalOverflow:'clip',paragraphs:[{runs:[{text:'A\nB',fontSize:20}],lineHeight:1.5}]}
+],async root=>{
+  const p=root.querySelector('.op-slide-paragraph'),frame=root.querySelector('.op-slide-text'),text=p.querySelector('span').firstChild;
+  near(parseFloat(getComputedStyle(p).lineHeight),36,'百分比行距误乘原始字号');
+  const a=document.createRange(),b=document.createRange();a.setStart(text,0);a.setEnd(text,1);b.setStart(text,2);b.setEnd(text,3);
+  near(b.getBoundingClientRect().y-a.getBoundingClientRect().y,36,'两行实际基线推进与行距不同');
+  assert(getComputedStyle(frame).overflow==='hidden','显式vertOverflow=clip未生效');
+}));
+
+window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);
+</script></body></html>

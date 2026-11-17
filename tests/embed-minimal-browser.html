@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Minimal embedded viewer checks</title><style>body{font:14px/1.6 system-ui;margin:24px}pre{white-space:pre-wrap}iframe,.host{display:block;width:760px;height:430px;margin:12px 0;border:1px solid #dce2ec}</style></head>
+<body><h1>极简嵌入与连续滚动检查</h1><pre id="results">检查中…</pre><div id="area"></div>
+<script type="module">
+import { OfficePreview } from '../src/index.js';
+import { samples } from '../fixtures/samples.js';
+
+const results = [], area = document.querySelector('#area'), output = document.querySelector('#results');
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function wait(predicate) { const end = Date.now() + 8000; while (Date.now() < end) { if (predicate()) return; await delay(20); } throw new Error('等待嵌入预览器超时'); }
+async function check(name, action) { try { await action(); results.push({ name, ok: true }); } catch (error) { results.push({ name, ok: false, error: error.stack || error.message }); } output.textContent = JSON.stringify(results, null, 2); }
+function receive(frame, type, requestId, expectedOrigin = location.origin) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); window.removeEventListener('message', listener); };
+    const listener = event => {
+      if (event.source !== frame.contentWindow || event.origin !== expectedOrigin || event.data?.type !== type) return;
+      if (requestId !== undefined && event.data.requestId !== requestId) return;
+      cleanup(); resolve(event.data);
+    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`iframe ${type} 超时`)); }, 8000);
+    window.addEventListener('message', listener);
+  });
+}
+async function embedded(action, showZoom = true) {
+  const frame = document.createElement('iframe'); frame.title = '极简文件预览检查';
+  frame.src = `../embed.html?parentOrigin=${encodeURIComponent(location.origin)}&showZoom=${showZoom ? '1' : '0'}`;
+  const ready = receive(frame, 'office-preview:ready'); area.append(frame);
+  try { await ready; await action(frame, frame.contentDocument.querySelector('#viewer').firstElementChild.shadowRoot); }
+  finally { frame.remove(); }
+}
+async function open(frame, format, requestId = 1) {
+  const entry = samples[format], bytes = Uint8Array.from(atob(entry.base64), character => character.charCodeAt(0));
+  const loaded = receive(frame, 'office-preview:loaded', requestId);
+  frame.contentWindow.postMessage({ type: 'office-preview:open', requestId, name: `embedded.${format}`, buffer: bytes.buffer }, location.origin, [bytes.buffer]);
+  return loaded;
+}
+const visible = element => !element.hidden && getComputedStyle(element).display !== 'none' && element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0;
+function minimal(root) {
+  assert(![...root.querySelectorAll('.op-toolbar,.op-bottom,.op-slide-list,.op-warning')].some(visible), '嵌入区仍显示顶部信息、底栏、侧页签或兼容横幅');
+  assert(![...root.querySelectorAll('button')].some(button => visible(button) && /上一页|下一页|上一段|下一段/.test(button.textContent)), '嵌入区仍有分页按钮');
+}
+
+await check('iframe ready / loaded 协议保持，组件仅保留缩放', () => embedded(async (frame, root) => {
+  const model = await open(frame, 'pptx');
+  assert(model.format === 'pptx' && Array.isArray(model.warnings), '宿主没有收到加载格式与兼容提示');
+  minimal(root);
+  const bigger = root.querySelector('button[aria-label="放大"]'), smaller = root.querySelector('button[aria-label="缩小"]');
+  assert(bigger && smaller && visible(bigger), '缺少可见缩放控件');
+  const before = parseInt(root.querySelector('.op-scale').textContent, 10); bigger.click();
+  assert(parseInt(root.querySelector('.op-scale').textContent, 10) > before, '放大没有改变实际缩放值');
+  smaller.click(); assert(parseInt(root.querySelector('.op-scale').textContent, 10) === before, '缩小不能恢复原缩放值');
+}));
+
+await check('PPT 全部页面保留滚动槽，滚到底后末页按原模型显示', () => embedded(async (frame, root) => {
+  await open(frame, 'pptx');
+  const pages = [...root.querySelectorAll('.op-slide-page[data-page]')];
+  assert(pages.length === 2, 'PPTX 两页没有全部保留在连续滚动布局中');
+  const viewport = root.querySelector('.op-viewport');
+  assert(viewport.scrollHeight > viewport.clientHeight, '多页PPT没有产生纵向滚动范围');
+  const last = pages.at(-1); last.scrollIntoView({ block: 'center', inline: 'nearest' });
+  await wait(() => last.dataset.ready === 'true' || last.textContent.includes('真实读取基础结构'));
+  assert(last.textContent.includes('真实读取基础结构'), '末页滚入视口后没有按文件内容渲染');
+  assert(pages[1].getBoundingClientRect().top > pages[0].getBoundingClientRect().bottom, 'PPT 页面没有从上到下排列');
+  minimal(root);
+}));
+
+await check('宿主仍能接收错误并在下一次打开时恢复', () => embedded(async (frame, root) => {
+  const requestId = 'unsupported'; const failed = receive(frame, 'office-preview:error', requestId);
+  const buffer = new TextEncoder().encode('not implemented').buffer;
+  frame.contentWindow.postMessage({ type: 'office-preview:open', requestId, name: 'unsupported.vsdx', buffer }, location.origin, [buffer]);
+  const error = await failed; assert(error.error.includes('vsdx'), '错误没有按原协议返回宿主');
+  assert(root.querySelector('.op-error'), '文件失败时没有明确显示错误');
+  await open(frame, 'csv', 'recover'); assert(root.querySelector('.op-grid'), '出错后不能继续打开新的文件'); minimal(root);
+}));
+
+await check('宿主可关闭组件缩放并继续通过公开 API 控制', async () => {
+  const host = document.createElement('div'); host.className = 'host'; area.append(host);
+  const viewer = new OfficePreview(host, { showZoom: false }), root = host.firstElementChild.shadowRoot;
+  try {
+    await viewer.open(new File(['name,value\nlocal,1'], 'host.csv'));
+    assert(![...root.querySelectorAll('button[aria-label="放大"],button[aria-label="缩小"]')].some(visible), 'showZoom:false 仍显示缩放按钮');
+    viewer.setZoom(1.25);
+    assert(root.querySelector('.op-content').style.getPropertyValue('--op-scale') === '1.25', '隐藏组件控件后公开缩放 API 失效');
+    minimal(root);
+  } finally { viewer.destroy(); host.remove(); }
+});
+
+await check('iframe showZoom=0 可交由同源宿主或 WebView 桥控制缩放', () => embedded(async (frame, root) => {
+  await open(frame, 'csv');
+  assert(![...root.querySelectorAll('button[aria-label="放大"],button[aria-label="缩小"]')].some(visible), 'iframe 参数没有关闭缩放控件');
+  frame.contentWindow.officePreview.setZoom(0.75);
+  assert(root.querySelector('.op-content').style.getPropertyValue('--op-scale') === '0.75', '原生 JS 桥缩放不可用');
+  minimal(root);
+}, false));
+
+await check('跨来源宿主缩放消息保留来源校验并返回实际缩放值', () => embedded(async (frame, root) => {
+  await open(frame, 'pptx');
+  const requestId = 'zoom-host'; const zoomed = receive(frame, 'office-preview:zoom', requestId);
+  frame.contentWindow.postMessage({ type: 'office-preview:setZoom', requestId, zoom: 1.4 }, location.origin);
+  const response = await zoomed;
+  assert(response.zoom === 1.4 && root.querySelector('.op-content').style.getPropertyValue('--op-scale') === '1.4', '消息没有设置或回传实际缩放');
+
+  for (const [origin, source] of [['https://untrusted.invalid', window], [location.origin, frame.contentWindow]]) {
+    frame.contentWindow.dispatchEvent(new frame.contentWindow.MessageEvent('message', { origin, source, data: { type: 'office-preview:setZoom', zoom: 2.9 } }));
+  }
+  assert(root.querySelector('.op-content').style.getPropertyValue('--op-scale') === '1.4', '错误 origin 或非 parent 窗口改变了缩放');
+
+  const invalid = receive(frame, 'office-preview:error', 'invalid-zoom');
+  frame.contentWindow.postMessage({ type: 'office-preview:setZoom', requestId: 'invalid-zoom', zoom: '2' }, location.origin);
+  assert((await invalid).error.includes('有限数字'), '无效缩放没有明确返回协议错误');
+  assert(root.querySelector('.op-content').style.getPropertyValue('--op-scale') === '1.4', '无效缩放改变了当前显示');
+
+  const fitted = receive(frame, 'office-preview:zoom', 'fit-host');
+  frame.contentWindow.postMessage({ type: 'office-preview:fit', requestId: 'fit-host' }, location.origin);
+  const fit = await fitted;
+  assert(Number.isFinite(fit.zoom) && fit.zoom > 0 && fit.zoom <= 1.5 && String(fit.zoom) === root.querySelector('.op-content').style.getPropertyValue('--op-scale'), 'fit没有同步实际缩放');
+  minimal(root);
+}, false));
+
+await check('真实跨来源 iframe 可仅通过消息打开文件并由宿主缩放', async () => {
+  const url = new URL('../embed.html', location.href);
+  url.hostname = location.hostname === '127.0.0.1' ? 'localhost' : '127.0.0.1';
+  url.searchParams.set('parentOrigin', location.origin); url.searchParams.set('showZoom', '0');
+  assert(url.origin !== location.origin, '测试未建立不同来源');
+  const frame = document.createElement('iframe'); frame.title = '跨来源消息嵌入检查'; frame.src = url.href;
+  const ready = receive(frame, 'office-preview:ready', undefined, url.origin); area.append(frame);
+  try {
+    await ready;
+    const loaded = receive(frame, 'office-preview:loaded', 'cross-file', url.origin);
+    const buffer = new TextEncoder().encode('name,value\ncross-origin,1').buffer;
+    frame.contentWindow.postMessage({ type: 'office-preview:open', requestId: 'cross-file', name: 'cross.csv', buffer }, url.origin, [buffer]);
+    assert((await loaded).format === 'csv', '跨来源文件字节没有被读取');
+    const zoomed = receive(frame, 'office-preview:zoom', 'cross-zoom', url.origin);
+    frame.contentWindow.postMessage({ type: 'office-preview:setZoom', requestId: 'cross-zoom', zoom: 1.6 }, url.origin);
+    assert((await zoomed).zoom === 1.6, '跨来源宿主缩放没有生效');
+  } finally { frame.remove(); }
+});
+
+window.officeBrowserTestResults = { total: results.length, passed: results.every(result => result.ok), results };
+document.documentElement.dataset.status = results.every(result => result.ok) ? 'pass' : 'fail';
+document.title = `${results.every(result => result.ok) ? 'PASS' : 'FAIL'} ${results.filter(result => result.ok).length}/${results.length}`;
+output.textContent = JSON.stringify(window.officeBrowserTestResults, null, 2);
+</script></body></html>

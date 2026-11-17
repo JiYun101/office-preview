@@ -1,0 +1,6 @@
+.browser-check/
+*.log
+
+# Keep local sample documents, embedded sample bytes, screenshots and packages private.
+/fixtures/
+/artifacts/

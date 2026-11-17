@@ -1,0 +1,99 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF 连续滚动检查</title><style>body{font:14px/1.6 system-ui;margin:24px}pre{white-space:pre-wrap}.viewer{height:480px;width:900px;margin:12px 0}.direct{height:280px;width:900px;overflow:auto;position:relative}</style></head><body><h1>PDF 连续滚动与资源释放</h1><label>选择 fixtures/sample.pdf：<input id="fixture-files" type="file" accept=".pdf"></label><pre id="results">检查中…</pre><div id="area"></div><script type="module">
+import { OfficePreview } from '../src/index.js';
+import { renderPdf } from '../src/render-pdf.js';
+const area=document.querySelector('#area'),output=document.querySelector('#results'),results=[];
+const assert=(value,message)=>{if(!value)throw new Error(message);};
+const wait=async predicate=>{const deadline=Date.now()+10000;while(Date.now()<deadline){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('等待 PDF 页面超时');};
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function file(){await wait(()=>document.querySelector('#fixture-files').files.length>0);return document.querySelector('#fixture-files').files[0];}
+async function check(name,action){try{await action();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}output.textContent=JSON.stringify(results,null,2);}
+async function withViewer(action){const host=document.createElement('div');host.className='viewer';area.append(host);host.scrollIntoView({block:'start'});const preview=new OfficePreview(host);try{await action(preview,host.firstElementChild.shadowRoot);}finally{preview.destroy();host.remove();}}
+function direct(pages){const viewport=document.createElement('div');viewport.className='direct';const content=document.createElement('div'),auxiliary=document.createElement('div');viewport.append(content);area.append(viewport);viewport.scrollIntoView({block:'start'});const rendered=renderPdf({pages},viewport,content,auxiliary);return {viewport,content,auxiliary,rendered,dispose(){rendered.dispose();viewport.remove();}};}
+const page=(height=1000)=>({width:600,height,operations:[{type:'path',commands:[['M',20,20],['L',300,20],['L',300,200],['Z']],fill:'#12765C'}]});
+
+await check('真实 PDF 使用完整纸页序列且没有上一页下一页控件',()=>withViewer(async(preview,root)=>{
+  const model=await preview.open(await file());
+  const slots=[...root.querySelectorAll('.op-pdf-slot')];
+  assert(model.kind==='pdf'&&slots.length===model.pages.length,'没有为每个真实 PDF 页面保留纸页位置');
+  assert(![...root.querySelectorAll('button')].some(button=>/上一页|下一页/.test(button.textContent)),'仍显示翻页按钮');
+  assert(slots[0].querySelector('canvas')?.dataset.ready==='true','首屏绘制完成前就触发 load');
+  assert(slots[1].getBoundingClientRect().top>slots[0].getBoundingClientRect().top,'PDF 页面没有按纵向排列');
+}));
+
+await check('滚动到底部可以读取末页，保留纸张宽高比例',()=>withViewer(async(preview,root)=>{
+  const model=await preview.open(await file()),viewport=root.querySelector('.op-viewport'),slot=root.querySelector('.op-pdf-slot:last-child');
+  viewport.scrollTop=viewport.scrollHeight;
+  await wait(()=>slot.querySelector('canvas')?.dataset.ready==='true');
+  const canvas=slot.querySelector('canvas');
+  assert(canvas.getAttribute('aria-label')===`PDF 第 ${model.pages.length} 页`,'末页绘制错位');
+  const last=model.pages.at(-1),ratio=parseFloat(slot.style.width)/parseFloat(slot.style.height);
+  assert(Math.abs(ratio-last.width/last.height)<0.001,'末页被拉伸');
+}));
+
+await check('放大后当前页重新生成更高分辨率的已完成画布',()=>withViewer(async(preview,root)=>{
+  await preview.open(await file());
+  const slot=root.querySelector('.op-pdf-slot');
+  preview.setZoom(1);
+  const density=Math.min(devicePixelRatio||1,2);
+  await wait(()=>slot.dataset.state==='ready'&&Math.abs(slot.querySelector('canvas')?.width-parseFloat(slot.style.width)*density)<=2);
+  const first=slot.querySelector('canvas'),width=first.width;
+  preview.setZoom(2);
+  assert(slot.querySelector('canvas')?.dataset.ready==='true','缩放期间丢弃了已有可见页面');
+  await wait(()=>slot.dataset.state==='ready'&&slot.querySelector('canvas')?.width>width*1.8);
+  const sharp=slot.querySelector('canvas');
+  assert(sharp!==first&&sharp.dataset.ready==='true','缩放只拉伸旧画布，没有完成重新绘制');
+  assert(sharp.width*sharp.height<=16000000&&Math.max(sharp.width,sharp.height)<=8192,'缩放突破像素上限');
+}));
+
+await check('大量页面只绘制附近内容，离开窗口后释放画布像素',async()=>{
+  const view=direct(Array.from({length:100},()=>page()));
+  try{
+    await view.rendered.ready;await delay(80);
+    assert(view.content.querySelectorAll('.op-pdf-slot').length===100,'页面占位数量不完整');
+    assert(view.content.querySelectorAll('canvas').length<10,'一次性创建了全部页面画布');
+    const first=view.content.querySelector('.op-pdf-slot'),last=view.content.querySelector('.op-pdf-slot:last-child');
+    view.viewport.scrollTop=view.viewport.scrollHeight;
+    await wait(()=>last.querySelector('canvas')?.dataset.ready==='true');
+    await wait(()=>!first.querySelector('canvas'));
+    assert(view.content.querySelectorAll('canvas').length<10,'滚动后旧画布未释放');
+  }finally{view.dispose();}
+});
+
+await check('离开页面取消慢图片绘制，旧错误不污染末页',async()=>{
+  const decode=Image.prototype.decode;let started=false,rejectOld;
+  Image.prototype.decode=function(){started=true;return new Promise((_,reject)=>{rejectOld=reject;});};
+  const second=page();second.operations.unshift({type:'image',mime:'image/jpeg',bytes:new Uint8Array([255,216,255,217]),width:1,height:1});
+  const view=direct([page(),second,page()]);
+  try{
+    await view.rendered.ready;
+    view.content.querySelector('[data-page="2"]').scrollIntoView({block:'start'});
+    await wait(()=>started);
+    view.viewport.scrollTop=view.viewport.scrollHeight;
+    const last=view.content.querySelector('[data-page="3"]');
+    await wait(()=>last.querySelector('canvas')?.dataset.ready==='true');
+    rejectOld(new Error('obsolete page decoding'));
+    await delay(30);
+    assert(!last.querySelector('.op-error')&&last.querySelector('canvas')?.dataset.ready==='true','旧页面错误覆盖当前内容');
+    assert(!view.content.querySelector('[data-page="2"] .op-error'),'取消的旧绘制被显示成用户错误');
+  }finally{view.dispose();Image.prototype.decode=decode;rejectOld?.(new Error('test cleanup'));}
+});
+
+await check('销毁等待中的首屏会立即释放资源并结束 ready',async()=>{
+  const decode=Image.prototype.decode,create=URL.createObjectURL,revoke=URL.revokeObjectURL;
+  let started=false,rejectDecode;const created=new Set(),released=new Set();
+  Image.prototype.decode=function(){started=true;return new Promise((_,reject)=>{rejectDecode=reject;});};
+  URL.createObjectURL=function(...args){const url=create.apply(this,args);created.add(url);return url;};
+  URL.revokeObjectURL=function(url){released.add(url);return revoke.call(this,url);};
+  const slow=page();slow.operations.unshift({type:'image',mime:'image/jpeg',bytes:new Uint8Array([255,216,255,217]),width:1,height:1});
+  const view=direct([slow]);const outcome=view.rendered.ready.then(()=>null,error=>error);
+  try{
+    await wait(()=>started);view.rendered.dispose();
+    const result=await Promise.race([outcome,delay(1000).then(()=>({name:'Timeout'}))]);
+    assert(result?.name==='AbortError','销毁仍在等待原图片完成');
+    assert(view.content.querySelectorAll('canvas').length===0,'销毁后仍保留画布');
+    assert([...created].every(url=>released.has(url)),'图片 Blob URL 未释放');
+  }finally{view.dispose();Image.prototype.decode=decode;URL.createObjectURL=create;URL.revokeObjectURL=revoke;rejectDecode?.(new Error('test cleanup'));}
+});
+
+window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);
+</script></body></html>

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Office Preview · 自研预览内核</title>
+  <link rel="stylesheet" href="./demo/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="./"><span class="brand-mark">O<span>·</span></span><span>Office Preview<small>自主预览内核 / SDK</small></span></a>
+    <div class="section-label">工作空间</div>
+    <div class="nav-item active"><span>▦</span> 文档预览 <span class="count">01</span></div>
+    <a class="nav-item" href="./examples/iframe.html"><span>↗</span> 嵌入示例</a>
+    <div class="section-label format-label">格式能力 <span>v0.1</span></div>
+    <div class="format-item"><i class="file-icon word">W</i><span>文字文档<small>DOCX · DOC</small></span><b>基础</b></div>
+    <div class="format-item"><i class="file-icon sheet">X</i><span>电子表格<small>XLSX · XLS · CSV</small></span><b>基础</b></div>
+    <div class="format-item"><i class="file-icon slide">P</i><span>演示文稿<small>PPTX · PPT</small></span><b>静态</b></div>
+    <div class="format-item"><i class="file-icon pdf">PDF</i><span>便携文档<small>PDF</small></span><b>基础</b></div>
+    <div class="format-item"><i class="file-icon mail">@</i><span>Outlook 邮件<small>EML · MSG</small></span><b>单封</b></div>
+    <div class="sidebar-note"><span class="status-dot"></span> 文件在本机解析<p>无需上传文件<br>不依赖第三方 Office 内核</p></div>
+    <div class="sidebar-bottom">DEVELOPMENT BUILD <span>0.1.0</span></div>
+  </aside>
+  <main>
+    <header><div class="breadcrumb">开发工作台 <span>/</span> <strong>文档预览</strong></div><span class="private-badge"><span class="status-dot"></span>本地运行</span></header>
+    <section class="workspace">
+      <div class="heading"><div><div class="eyebrow">EMBEDDABLE OFFICE SDK</div><h1>让文档，融入你的软件。</h1><p>同一套预览界面，嵌入网页、桌面应用与业务系统。</p></div><a class="integration-link" href="./examples/iframe.html">查看集成示例 <span>↗</span></a></div>
+      <div class="development-note"><span>开发验证版</span> Word · Excel · PowerPoint · PDF · Outlook 邮件。当前为基础预览，复杂排版与高级功能仍待补齐。</div>
+      <section id="drop-zone" class="drop-zone" aria-label="文件拖放区">
+        <div class="upload-icon">↥</div><div class="upload-copy"><strong>拖入文件，开始预览</strong><p>DOC / DOCX · XLS / XLSX / CSV · PPT / PPTX · PDF · EML / MSG</p></div>
+        <div class="upload-actions"><button id="open-file" class="primary-button" type="button">选择文件 <span>+</span></button><small>本地解析 · 单个文件最大 32MB</small></div>
+        <input id="file-input" type="file" accept=".csv,.tsv,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.pdf,.eml,.msg" hidden>
+      </section>
+      <div class="sample-bar"><span>开发样本</span><button type="button" data-sample="docx"><i class="tiny-dot word-dot"></i>文字文档</button><button type="button" data-sample="xlsx"><i class="tiny-dot sheet-dot"></i>电子表格</button><button type="button" data-sample="pptx"><i class="tiny-dot slide-dot"></i>演示文稿</button><button type="button" data-sample="pdf">PDF</button><button type="button" data-sample="eml">EML 邮件</button><button type="button" data-sample="msg">MSG 邮件</button><button type="button" data-sample="csv">CSV</button><label>旧版格式<select id="legacy-sample" aria-label="旧版开发样本"><option value="">选择样本</option><option value="doc">DOC 97–2003</option><option value="xls">XLS 97–2003</option><option value="ppt">PPT 97–2003</option></select></label><span id="load-status" role="status" aria-live="polite">等待打开</span></div>
+      <div class="viewer-heading"><span>预览画布</span><div class="decode-controls"><label>文本编码<select id="encoding" aria-label="文本编码"><option value="auto">自动识别</option><option value="utf-8">UTF-8</option><option value="utf-16le">UTF-16 LE</option><option value="gb18030">GB18030 / GBK</option></select></label><label>CSV分隔符<select id="delimiter" aria-label="CSV分隔符"><option value="auto">自动</option><option value=",">逗号</option><option value=";">分号</option><option value="tab">制表符</option></select></label></div></div>
+      <section id="viewer" class="viewer" aria-label="Office 文档预览"></section>
+      <footer><span>开发样本由本项目生成，仅验证基础链路。</span><span>Web / WebView / iframe <i>●</i> 本地文件</span></footer>
+    </section>
+  </main>
+  <script type="module" src="./demo/app.js"></script>
+</body>
+</html>

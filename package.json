@@ -1,0 +1,17 @@
+{
+  "name": "office-preview-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "description": "自主实现的浏览器 Office 基础预览 SDK，开发验证版",
+  "scripts": {
+    "start": "node scripts/serve.mjs",
+    "fixtures": "node scripts/generate-all-fixtures.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "test:browser": "node scripts/browser-check.mjs",
+    "package:macos": "node scripts/package-macos.mjs",
+    "package:sdk": "node scripts/package-sdk.mjs"
+  },
+  "engines": { "node": ">=22" }
+}

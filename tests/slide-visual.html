@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Slide visual measurement</title>
+<style>html,body{margin:0;padding:0;overflow:hidden;background:white}input{display:none}#viewer{width:1280px;height:720px}</style></head>
+<body><input id="documents" type="file" multiple accept=".ppt,.pptx"><input id="reference" type="file" accept="image/*"><div id="viewer"></div>
+<script type="module">
+import { OfficePreview } from '../src/index.js';
+
+const host = document.querySelector('#viewer');
+const preview = new OfficePreview(host);
+const root = host.firstElementChild.shadowRoot;
+const style = document.createElement('style');
+// Only test chrome is removed. The slide and its children use the production renderer.
+style.textContent = `:host{height:100%}.op-shell{border:0;border-radius:0;min-height:0}.op-zoom-controls,.op-auxiliary{display:none!important}.op-viewport{overflow:hidden}.op-content{padding:0;min-height:0;width:max-content}.op-slide{margin:0;box-shadow:none}`;
+root.append(style);
+
+let referenceImage;
+const loadImage = async source => { const image = new Image(); image.src = source; await image.decode(); return image; };
+const canvasFor = (image, width, height) => { const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;const context=canvas.getContext('2d',{willReadFrequently:true});context.drawImage(image,0,0,width,height);return {canvas,context}; };
+async function reference() {
+  if (!referenceImage) {
+    const file = document.querySelector('#reference').files[0];
+    if (!file) throw new Error('Reference image is missing.');
+    const url = URL.createObjectURL(file);
+    try { referenceImage = await loadImage(url); } finally { URL.revokeObjectURL(url); }
+  }
+  return referenceImage;
+}
+const rect = element => { const box=element.getBoundingClientRect();return {x:box.x,y:box.y,width:box.width,height:box.height}; };
+function roiPixels(fraction,width,height) { return {x:Math.floor(fraction[0]*width),y:Math.floor(fraction[1]*height),width:Math.max(1,Math.floor(fraction[2]*width)),height:Math.max(1,Math.floor(fraction[3]*height))}; }
+function regionMetrics(a,b,width,height,region,threshold=30) {
+  const {x,y,width:w,height:h}=region;
+  let sum=0,changed=0,count=0;
+  const boundA={left:Infinity,top:Infinity,right:-1,bottom:-1},boundB={left:Infinity,top:Infinity,right:-1,bottom:-1};
+  const bright=(data,offset)=>0.2126*data[offset]+0.7152*data[offset+1]+0.0722*data[offset+2]>70;
+  const extend=(bounds,xx,yy)=>{bounds.left=Math.min(bounds.left,xx);bounds.top=Math.min(bounds.top,yy);bounds.right=Math.max(bounds.right,xx);bounds.bottom=Math.max(bounds.bottom,yy);};
+  for(let yy=y;yy<Math.min(y+h,height);yy++)for(let xx=x;xx<Math.min(x+w,width);xx++) {
+    const offset=(yy*width+xx)*4;
+    const dr=Math.abs(a[offset]-b[offset]),dg=Math.abs(a[offset+1]-b[offset+1]),db=Math.abs(a[offset+2]-b[offset+2]);
+    sum+=dr+dg+db; if(Math.max(dr,dg,db)>threshold)changed++;count++;
+    if(bright(a,offset))extend(boundA,xx,yy);if(bright(b,offset))extend(boundB,xx,yy);
+  }
+  const bounds=value=>value.right<0?null:{x:value.left,y:value.top,width:value.right-value.left+1,height:value.bottom-value.top+1};
+  return {region,maeRGB:sum/(count*3),changedPixelRatio:changed/count,threshold,referenceBrightBounds:bounds(boundA),previewBrightBounds:bounds(boundB)};
+}
+
+window.slideVisual = {
+  addStyle(css) {
+    let override=root.querySelector('style[data-visual-override]');
+    if(!override){override=document.createElement('style');override.dataset.visualOverride='true';root.append(override);}
+    override.textContent=String(css||'');
+  },
+  async referenceSize() { const image=await reference();return {width:image.naturalWidth,height:image.naturalHeight}; },
+  async prepare(index,width,height) {
+    const file = document.querySelector('#documents').files[index];
+    if (!file) throw new Error('Document file is missing.');
+    host.style.width=`${width}px`;host.style.height=`${height}px`;
+    const model=await preview.open(file);
+    if(model.kind!=='presentation')throw new Error('Visual measurement requires a presentation.');
+    preview.setZoom(width/model.width);
+    await document.fonts.ready;
+    await Promise.all([...root.querySelectorAll('img')].map(image=>image.decode()));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const slide=root.querySelector('.op-slide');
+    const bounds=rect(slide);
+    if(Math.abs(bounds.width-width)>0.6)throw new Error(`Unexpected slide width ${bounds.width}; expected ${width}.`);
+    return {name:model.name,format:model.format,pageCount:model.slides.length,modelWidth:model.width,modelHeight:model.height,scale:width/model.width,bounds,warnings:model.warnings};
+  },
+  geometry() {
+    const slide=root.querySelector('.op-slide'),slideBounds=slide.getBoundingClientRect();
+    const scale=slideBounds.width/parseFloat(slide.style.width);
+    return [...slide.children].map((element,index)=>{
+      const box=element.getBoundingClientRect(),computed=getComputedStyle(element);
+      return {index,type:element.className,x:(box.x-slideBounds.x)/scale,y:(box.y-slideBounds.y)/scale,width:box.width/scale,height:box.height/scale,background:computed.backgroundColor,paint:computed.backgroundImage,border:computed.border,borderRadius:computed.borderRadius,paragraphs:[...element.querySelectorAll('.op-slide-paragraph')].map(paragraph=>{
+        const style=getComputedStyle(paragraph),bounds=paragraph.getBoundingClientRect();
+        return {x:(bounds.x-slideBounds.x)/scale,y:(bounds.y-slideBounds.y)/scale,width:bounds.width/scale,height:bounds.height/scale,fontFamily:style.fontFamily,fontSize:style.fontSize,lineHeight:style.lineHeight,letterSpacing:style.letterSpacing,textLength:paragraph.textContent.length,runs:[...paragraph.querySelectorAll('span')].map(span=>{const css=getComputedStyle(span);return {fontSize:css.fontSize,fontWeight:css.fontWeight,fontFamily:css.fontFamily,letterSpacing:css.letterSpacing,color:css.color,textLength:span.textContent.length};})};
+      })};
+    });
+  },
+  async colorInterpolation() {
+    const image=await reference(),width=image.naturalWidth,height=image.naturalHeight;
+    const source=canvasFor(image,width,height).context;
+    const y=Math.min(4,height-1),pixel=x=>[...source.getImageData(x,y,1,1).data].slice(0,3);
+    const start=pixel(0),end=pixel(width-1),positions=[0,0.02,0.25,0.5,0.75,0.98,1].map(value=>Math.floor(value*(width-1)));
+    const canvas=document.createElement('canvas');canvas.width=canvas.height=1;const context=canvas.getContext('2d',{willReadFrequently:true});
+    const result={start,end,width,y,reference:positions.map(x=>({x,rgb:pixel(x)})),spaces:[]};
+    for(const space of ['srgb','srgb-linear','oklab','oklch','lab','lch','xyz-d65','xyz-d50','hsl','hwb']) {
+      const samples=[];let supported=true;
+      for(const x of positions) {
+        const ratio=x/(width-1),color=`color-mix(in ${space},rgb(${start.join(' ')}) ${(1-ratio)*100}%,rgb(${end.join(' ')}) ${ratio*100}%)`;
+        if(!CSS.supports('color',color)){supported=false;break;}
+        context.clearRect(0,0,1,1);context.fillStyle='rgb(1,2,3)';context.fillStyle=color;
+        if(context.fillStyle==='#010203'){supported=false;break;}
+        context.fillRect(0,0,1,1);samples.push({x,rgb:[...context.getImageData(0,0,1,1).data].slice(0,3)});
+      }
+      const mae=supported?samples.reduce((sum,sample,index)=>sum+sample.rgb.reduce((part,value,channel)=>part+Math.abs(value-result.reference[index].rgb[channel]),0),0)/(samples.length*3):null;
+      result.spaces.push({space,supported,mae,samples});
+    }
+    return result;
+  },
+  async compare(base64) {
+    const original=await reference(),width=original.naturalWidth,height=original.naturalHeight;
+    const candidate=await loadImage('data:image/png;base64,'+base64);
+    if(candidate.naturalWidth!==width||candidate.naturalHeight!==height)throw new Error('Screenshots must have the same dimensions; image stretching is not permitted.');
+    const a=canvasFor(original,width,height),b=canvasFor(candidate,width,height);
+    const referencePixels=a.context.getImageData(0,0,width,height),previewPixels=b.context.getImageData(0,0,width,height);
+    const regions={whole:[0,0,1,1],topStrip:[0,0,1,0.016],upperText:[0.065,0.20,0.48,0.19],middleText:[0.065,0.43,0.51,0.14],lowerBand:[0.05,0.60,0.90,0.20],footer:[0.05,0.82,0.90,0.09]};
+    const metrics={};for(const [name,fraction] of Object.entries(regions))metrics[name]=regionMetrics(referencePixels.data,previewPixels.data,width,height,roiPixels(fraction,width,height));
+    const sample=(data,x,y)=>[...data.subarray((y*width+x)*4,(y*width+x)*4+3)];
+    const y=Math.min(4,height-1);
+    const topStripSamples=[0.02,0.25,0.50,0.75,0.98].map(position=>{const x=Math.floor(position*(width-1));return {x,y,reference:sample(referencePixels.data,x,y),preview:sample(previewPixels.data,x,y)};});
+    const diff=document.createElement('canvas');diff.width=width;diff.height=height;
+    const context=diff.getContext('2d'),pixels=context.createImageData(width,height);
+    for(let i=0;i<referencePixels.data.length;i+=4){for(let c=0;c<3;c++)pixels.data[i+c]=Math.min(255,Math.abs(referencePixels.data[i+c]-previewPixels.data[i+c])*3);pixels.data[i+3]=255;}
+    context.putImageData(pixels,0,0);
+    return {metrics,topStripSamples,diffPng:diff.toDataURL('image/png').split(',')[1]};
+  }
+};
+window.addEventListener('pagehide',()=>preview.destroy());
+</script></body></html>

@@ -1,0 +1,63 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Continuous worksheet checks</title><style>body{font:14px/1.6 system-ui;margin:20px}pre{white-space:pre-wrap}.viewer{height:520px;width:920px;margin:16px 0}</style></head><body><h1>电子表格连续滚动验证</h1><pre id="results">检查中…</pre><div id="area"></div><script type="module">
+import { OfficePreview } from '../src/index.js';
+import { renderModel } from '../src/render.js';
+import { viewerStyles } from '../src/styles.js';
+const area=document.querySelector('#area'),output=document.querySelector('#results'),results=[];
+const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+async function wait(predicate){const end=Date.now()+10000;while(Date.now()<end){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('等待滚动窗口更新超时');}
+async function check(name,action){try{await action();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}output.textContent=JSON.stringify(results,null,2);}
+async function withViewer(action){const host=document.createElement('div');host.className='viewer';area.append(host);const preview=new OfficePreview(host),root=host.firstElementChild.shadowRoot;try{await action(preview,root);}finally{preview.destroy();host.remove();}}
+const csv=()=>new File([Array.from({length:1000},(_,row)=>Array.from({length:100},(_,col)=>`R${row}C${col}`).join(',')).join('\n')],'large.csv');
+
+await check('单工作表通过真实File与Worker打开，不带公式栏和分页菜单',()=>withViewer(async(preview,root)=>{
+  const model=await preview.open(csv());
+  assert(model.sheets[0].rows.length===1000&&model.sheets[0].rows[999][99].value==='R999C99','CSV解析丢失行列');
+  assert(root.querySelector('td[title^="A1:"]')?.textContent==='R0C0','首格没有显示');
+  assert(!root.querySelector('.op-formula,.op-data-controls,.op-tabs'),'单表格仍显示额外的工具/翻页区');
+  assert(root.querySelectorAll('.op-grid td').length<4000,'一次创建了整个工作表的单元格');
+}));
+
+await check('上下与左右滚动能到达第1000行第100列，缩放后仍可访问末格',()=>withViewer(async(preview,root)=>{
+  await preview.open(csv());const viewport=root.querySelector('.op-viewport');
+  viewport.scrollTop=viewport.scrollHeight;viewport.scrollLeft=viewport.scrollWidth;
+  await wait(()=>root.querySelector('td[title^="CV1000:"]')?.textContent==='R999C99');
+  assert(root.querySelector('thead th:last-child').textContent==='CV','水平滚动没有保持真实列号');
+  assert(root.querySelectorAll('.op-grid td').length<4000,'末端窗口创建了过量单元格');
+  preview.setZoom(2);await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  viewport.scrollTop=viewport.scrollHeight;viewport.scrollLeft=viewport.scrollWidth;
+  await wait(()=>root.querySelector('td[title^="CV1000:"]')?.textContent==='R999C99');
+  viewport.scrollTop=0;viewport.scrollLeft=0;
+  await wait(()=>root.querySelector('td[title^="A1:"]')?.textContent==='R0C0');
+}));
+
+await check('CSV 引号字段中的单独CR也增加行高，不裁掉下一行内容',()=>withViewer(async(preview,root)=>{
+  await preview.open(new File(['first,second\n"upper\rlower",end'],'old-mac.csv'));
+  const cell=root.querySelector('td[title^="A2:"]'),text=cell.querySelector('.op-cell-text'),box=cell.querySelector('.op-cell-content');
+  assert(cell.textContent==='upper\rlower','CSV 单独CR文本被修改');
+  assert(cell.getBoundingClientRect().height>=45,'CR分隔的两行仍使用单行高度');
+  assert(text.getBoundingClientRect().height<=box.getBoundingClientRect().height+0.5,'下一行文字超出单元格可见内容区域');
+}));
+
+await check('合并区域横跨虚拟窗口仍从原锚点读取，并保持完整合并区域的对齐',async()=>{
+  const host=document.createElement('div');host.className='viewer';area.append(host);
+  const root=host.attachShadow({mode:'open'}),style=document.createElement('style');style.textContent=viewerStyles;
+  const shell=document.createElement('div'),viewport=document.createElement('div'),content=document.createElement('div'),auxiliary=document.createElement('div');
+  shell.className='op-shell';viewport.className='op-viewport';content.className='op-content';viewport.append(content);shell.append(auxiliary,viewport);root.append(style,shell);
+  const rows=[];rows[0]=[{value:'Merged anchor',style:{align:'center',verticalAlign:'middle'}}];rows[999]=Array.from({length:100},(_,col)=>({value:`LAST ${col}`}));
+  const rendered=renderModel({kind:'spreadsheet',format:'xlsx',sheets:[{name:'Merged',rows,merges:[{startRow:0,startCol:0,endRow:499,endCol:99}]}]},viewport,content,auxiliary);
+  try{
+    await rendered.ready;
+    viewport.scrollTop=500*31/2-viewport.clientHeight/2+31;viewport.scrollLeft=100*105/2-viewport.clientWidth/2+45;
+    await wait(()=>Number(root.querySelector('.op-grid')?.dataset.startRow)>0&&Number(root.querySelector('.op-grid')?.dataset.startCol)>0);
+    const cell=root.querySelector('td[title^="A1:"]');assert(cell&&cell.textContent==='Merged anchor','原始锚点位于窗口外时，合并值丢失');
+    assert(cell.rowSpan>1&&cell.colSpan>1,'合并区域被压成普通单元格');
+    const text=cell.querySelector('.op-cell-text').getBoundingClientRect(),box=viewport.getBoundingClientRect();
+    assert(text.left>=box.left-2&&text.right<=box.right+2&&text.top>=box.top-2&&text.bottom<=box.bottom+2,'合并文字没有在完整合并区域的中心显示');
+    viewport.scrollTop=viewport.scrollHeight;viewport.scrollLeft=viewport.scrollWidth;
+    await wait(()=>root.querySelector('td[title^="CV1000:"]')?.textContent==='LAST 99');
+    assert(root.querySelectorAll('.op-grid td').length<4000,'合并区域导致全表DOM展开');
+  }finally{rendered.dispose();host.remove();}
+});
+
+window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);
+</script></body></html>

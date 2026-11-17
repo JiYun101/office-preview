@@ -1,0 +1,128 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF 清晰度检查</title><style>html,body{margin:0;height:100%;overflow:hidden}#viewer{height:100%}input{display:none}</style></head><body><input id="fixture-files" type="file" accept=".pdf" multiple><input id="reference" type="file" accept="image/*"><div id="viewer"></div><script type="module">
+const parameters=new URLSearchParams(location.search);
+const source=parameters.get('source');
+const {OfficePreview}=await import(source?.startsWith('/artifacts/pdf-preview-')?source:'../src/index.js');
+let preview,model;
+const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const frame=()=>new Promise(resolve=>requestAnimationFrame(resolve));
+const bounds=node=>{const b=node.getBoundingClientRect();return {x:b.x,y:b.y,width:b.width,height:b.height};};
+const slot=()=>preview?.root.querySelector('.op-pdf-slot');
+async function settled(){
+  await frame();await frame();
+  const deadline=performance.now()+30000;let previous='',stable=0;
+  while(performance.now()<deadline){
+    const paper=slot(),canvas=paper?.querySelector('canvas');
+    if(paper?.dataset.state==='error')throw new Error('PDF page rendering failed.');
+    const signature=paper?.dataset.state==='ready'&&canvas?.dataset.ready==='true'?`${canvas.width}/${canvas.height}/${bounds(paper).width}`:'';
+    stable=signature&&signature===previous?stable+1:0;previous=signature;
+    if(stable>=3){await frame();await frame();return;}
+    await delay(50);
+  }
+  throw new Error('PDF canvas did not settle.');
+}
+function metadata(){
+  const paper=slot(),canvas=paper?.querySelector('canvas'),box=bounds(paper),operations=model.pages[0]?.operations||[];
+  const fontResources=(model.fonts||[]).map(font=>({id:font.id,family:font.family||font.fontFamily,weight:font.weight,style:font.style,status:[...document.fonts].find(face=>{const family=face.family.replaceAll('"','');return family===(font.family||font.fontFamily)||family.startsWith('OfficePreviewPdf_')&&family.endsWith('_'+font.id);})?.status,bytes:font.program?.bytes?.byteLength||font.bytes?.byteLength||font.data?.byteLength||0}));
+  return {format:model.format,pageCount:model.pages.length,zoom:preview.zoom,dpr:devicePixelRatio,paper:box,paperState:paper.dataset.state,canvas:{width:canvas.width,height:canvas.height,ready:canvas.dataset.ready==='true',css:bounds(canvas)},pixelDensity:{x:canvas.width/box.width,y:canvas.height/box.height},computedZoom:getComputedStyle(preview.content).zoom,warnings:model.warnings?.length||0,fonts:{resources:fontResources,registered:[...document.fonts].map(face=>({family:face.family,status:face.status,weight:face.weight,style:face.style})),families:[...new Set(operations.filter(op=>op.type==='text').map(op=>op.fontFamily))],weights:[...new Set(operations.filter(op=>op.type==='text').map(op=>op.fontWeight||'normal'))],embeddedOperations:operations.filter(op=>op.type==='text'&&(op.fontId||op.renderText!==undefined)).length},textOperationCount:operations.filter(op=>op.type==='text').length};
+}
+window.pdfPreview={
+  async open(index=0,zoom=1){preview?.destroy();preview=new OfficePreview(document.querySelector('#viewer'),{showZoom:false,zoom});model=await preview.open(document.querySelector('#fixture-files').files[index]);await settled();return metadata();},
+  async zoom(value){preview.setZoom(value);await settled();return metadata();},
+  metadata,
+  async rasterSample(base64){
+    const image=new Image();image.src='data:image/png;base64,'+base64;await image.decode();
+    const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;
+    const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);
+    const x=Math.round(canvas.width*.5),y=Math.round(canvas.width*.18),pixels=ctx.getImageData(x,y,8,8).data,mean=[0,0,0];
+    for(let index=0;index<pixels.length;index+=4)for(let channel=0;channel<3;channel++)mean[channel]+=pixels[index+channel]/64;
+    const all=ctx.getImageData(0,0,canvas.width,canvas.height).data;let sampled=0,ink=0;
+    for(let y=12;y<canvas.height-12;y+=12)for(let x=12;x<canvas.width-12;x+=12){const at=(y*canvas.width+x)*4;sampled++;if(Math.min(all[at],all[at+1],all[at+2])<230)ink++;}
+    return {location:{x,y,size:8},rgb:mean.map(value=>Math.round(value)),sampledInkRatio:ink/Math.max(1,sampled)};
+  },
+  async reference(){
+    const file=document.querySelector('#reference').files[0],url=URL.createObjectURL(file),image=new Image();image.src=url;await image.decode();
+    const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);URL.revokeObjectURL(url);
+    const {width,height}=canvas,pixels=ctx.getImageData(0,0,width,height).data;
+    let left=0,right=width-1,longest=0;
+    for(let row=0;row<Math.min(height,Math.floor(height*.25));row+=3){
+      const white=x=>{const i=(row*width+x)*4;return pixels[i]>248&&pixels[i+1]>248&&pixels[i+2]>248;};
+      const center=Math.floor(width/2);if(!white(center))continue;
+      let start=center,end=center;while(start>0&&white(start-1))start--;while(end<width-1&&white(end+1))end++;
+      const length=end-start+1;if(length>longest&&length<width*.95){left=start;right=end;longest=length;}
+    }
+    if(longest<width*.25)throw new Error('No clear white-paper boundary in reference screenshot.');
+    // The reference is an application screenshot. Find the continuous paper
+    // boundary from a blank scanline; keep its visible crop without stretching.
+    let top=0;const x=Math.min(right,left+8);while(top<height){const i=(top*width+x)*4;if(pixels[i]>248&&pixels[i+1]>248&&pixels[i+2]>248)break;top++;}
+    const cropped=document.createElement('canvas');cropped.width=right-left+1;cropped.height=height-top;cropped.getContext('2d').drawImage(canvas,left,top,cropped.width,cropped.height,0,0,cropped.width,cropped.height);
+    return {width,height,crop:{x:left,y:top,width:cropped.width,height:cropped.height},png:cropped.toDataURL('image/png').split(',')[1]};
+  }
+};
+
+if(!parameters.has('inspect')&&!parameters.has('source')){
+  const results=[],assert=(value,message)=>{if(!value)throw new Error(message);};
+  const check=async(name,action)=>{try{await action();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}};
+  const deadline=performance.now()+30000;while(!document.querySelector('#fixture-files').files.length&&performance.now()<deadline)await delay(30);
+  await check('PDF 质量回归通过真实 File、Worker 和 SDK 打开',async()=>{
+    const info=await window.pdfPreview.open(0,1);
+    assert(info.format==='pdf'&&info.pageCount>0&&info.textOperationCount>0,'PDF fixture did not reach the page renderer.');
+    assert(slot().dataset.state==='ready'&&slot().querySelector('canvas')?.dataset.ready==='true','First-page load preceded completed drawing.');
+  });
+  for(const zoom of [.75,1.5,2])await check(`${Math.round(zoom*100)}% 缩放后画布像素覆盖实际显示尺寸`,async()=>{
+    const info=await window.pdfPreview.zoom(zoom),density=Math.min(devicePixelRatio||1,8192/Math.max(info.paper.width,info.paper.height),Math.sqrt(16000000/(info.paper.width*info.paper.height)));
+    assert(info.pixelDensity.x>=density-.015&&info.pixelDensity.y>=density-.015,'Backing canvas is stretched beyond screen-pixel density.');
+    const source=model.pages[0];assert(Math.abs(info.paper.width/info.paper.height-source.width/source.height)<.001,'Paper aspect ratio changed.');
+    assert(info.canvas.width*info.canvas.height<=16000000&&Math.max(info.canvas.width,info.canvas.height)<=8192,'Drawing exceeded page pixel limits.');
+  });
+  await check('缩放保留已完成纸页，随后替换为新画布',async()=>{
+    await window.pdfPreview.zoom(1);const first=slot().querySelector('canvas'),width=first.width;
+    preview.setZoom(1.5);
+    assert(slot().querySelector('canvas')?.dataset.ready==='true','Zoom removed the last completed visible canvas.');
+    await settled();const next=slot().querySelector('canvas');
+    assert(next!==first&&next.width>width*1.2,'Zoom reused and stretched the old bitmap.');
+  });
+  await check('自造嵌入字体经过重打包后由浏览器绘制正确字形',async()=>{
+    const [{buildPdfFontFixture},{preparePdfFontProgram}]=await Promise.all([import('../scripts/pdf-font-fixture.mjs'),import('../src/parsers/pdf-font-program.js')]);
+    const program=preparePdfFontProgram(buildPdfFontFixture({weight:700})),face=new FontFace('OfficePreviewQualityFixture',program.bytes,{weight:'700'});
+    try{
+      await face.load();document.fonts.add(face);
+      const canvas=document.createElement('canvas');canvas.width=220;canvas.height=130;const ctx=canvas.getContext('2d');
+      ctx.fillStyle='white';ctx.fillRect(0,0,220,130);ctx.fillStyle='black';ctx.font='700 100px "OfficePreviewQualityFixture"';
+      ctx.fillText(program.renderText(1),10,110);ctx.fillText(program.renderText(2),120,110);
+      const pixel=(x,y)=>ctx.getImageData(x,y,1,1).data[0];
+      assert(face.status==='loaded'&&pixel(50,70)<50&&pixel(15,35)>240&&pixel(125,35)<50,'Browser font sanitizer or glyph remapping changed the authored triangle/square.');
+    }finally{document.fonts.delete(face);}
+  });
+  await check('真实 PDF 字体资源经过 Worker 加载，销毁后释放 FontFace',async()=>{
+    const {buildPdfFontFixture}=await import('../scripts/pdf-font-fixture.mjs');
+    const encoder=new TextEncoder(),encode=value=>typeof value==='string'?encoder.encode(value):value;
+    const join=chunks=>{chunks=chunks.map(encode);const result=new Uint8Array(chunks.reduce((size,chunk)=>size+chunk.length,0));let at=0;for(const chunk of chunks){result.set(chunk,at);at+=chunk.length;}return result;};
+    const stream=bytes=>join([`<< /Length ${bytes.length} >>\nstream\n`,bytes,'\nendstream']);
+    const content=encoder.encode('BT /F1 80 Tf 1 0 0 1 30 100 Tm (AB) Tj ET');
+    const objects=[
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 250] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+      stream(content),
+      '<< /Type /Font /Subtype /TrueType /BaseFont /OfficePreviewFixture-Bold /Encoding /WinAnsiEncoding /FirstChar 65 /LastChar 66 /Widths [900 1000] /FontDescriptor 6 0 R >>',
+      '<< /Type /FontDescriptor /FontName /OfficePreviewFixture-Bold /Flags 32 /FontBBox [0 0 800 800] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 800 /StemV 80 /FontWeight 700 /FontFile2 7 0 R >>',
+      stream(buildPdfFontFixture({weight:700})),
+    ];
+    const chunks=[encoder.encode('%PDF-1.4\n')],offsets=[0];let offset=chunks[0].length;
+    objects.forEach((body,index)=>{offsets.push(offset);const object=join([`${index+1} 0 obj\n`,body,'\nendobj\n']);chunks.push(object);offset+=object.length;});
+    const xref=offset;chunks.push(encoder.encode(`xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(offset=>String(offset).padStart(10,'0')+' 00000 n \n').join('')}trailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`));
+    preview?.destroy();const before=new Set(document.fonts);
+    preview=new OfficePreview(document.querySelector('#viewer'),{showZoom:false,zoom:1});
+    model=await preview.open(new File([join(chunks)],'self-authored-font.pdf',{type:'application/pdf'}));await settled();
+    const loaded=[...document.fonts].filter(face=>!before.has(face));
+    assert(model.fonts?.length===1&&loaded.length===1&&loaded[0].status==='loaded','SDK did not register the parsed embedded font before drawing.');
+    assert(loaded[0].weight==='700','Embedded font weight was not preserved.');
+    assert(model.pages[0].operations.some(operation=>operation.type==='text'&&operation.renderText&&operation.renderText!==operation.text),'Parsed glyph IDs did not reach the renderer.');
+    preview.destroy();assert(loaded.every(face=>!document.fonts.has(face)),'Destroy retained an embedded FontFace.');
+  });
+  preview?.destroy();
+  window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};
+  document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';
+  document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;
+}
+</script></body></html>

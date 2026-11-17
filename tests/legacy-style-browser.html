@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>旧版 Office 样式验证</title>
+<style>body{font:14px/1.7 system-ui;margin:24px;background:#f6f8fb;color:#26334a}pre{white-space:pre-wrap;background:white;padding:20px;border:1px solid #dce3ef;border-radius:8px}.viewer{width:1200px;height:720px;margin:20px 0}</style></head>
+<body>
+<h1>旧版 XLS / PPT 格式还原验证</h1>
+<p>使用自主构造的真实 BIFF8 / OfficeArt 二进制记录，经 File、Worker、SDK 到 DOM 验证。测试不代表所有真实 Office 文件的完整兼容性。</p>
+<label>选择 fixtures/styled.xls 与 fixtures/styled.ppt：<input id="fixture-files" type="file" multiple accept=".xls,.ppt"></label>
+<pre id="results">验证中…</pre><div id="area"></div>
+<script type="module">
+import { OfficePreview } from '../src/index.js';
+import { renderModel } from '../src/render.js';
+import { viewerStyles } from '../src/styles.js';
+const results=[],area=document.querySelector('#area'),output=document.querySelector('#results');
+const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+const near=(actual,expected,message,tolerance=2)=>assert(Math.abs(actual-expected)<=tolerance,`${message}（实际 ${actual}，期望 ${expected}）`);
+async function wait(predicate){const end=Date.now()+10000;while(Date.now()<end){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,20));}throw new Error('等待本地文件或图片完成超时');}
+async function file(name){await wait(()=>document.querySelector('#fixture-files').files.length>0);const found=[...document.querySelector('#fixture-files').files].find(file=>file.name===name);assert(found,`缺少本地样本：${name}`);return found;}
+async function check(name,run){try{await run();results.push({name,ok:true});}catch(error){results.push({name,ok:false,error:error.stack||error.message});}output.textContent=JSON.stringify(results,null,2);}
+async function withViewer(run){const container=document.createElement('div');container.className='viewer';area.append(container);const viewer=new OfficePreview(container),root=container.firstElementChild.shadowRoot;try{await run(viewer,root);}finally{viewer.destroy();container.remove();}}
+const cell=(root,address)=>root.querySelector(`td[title^="${address}:"]`);
+const textNode=node=>node.querySelector('.op-cell-text')||node.firstElementChild||node;
+
+await check('XLS 标题、表头、边框、调色板与对齐从二进制格式还原',()=>withViewer(async(viewer,root)=>{
+  const model=await viewer.open(await file('styled.xls'));
+  assert(model.format==='xls'&&model.sheets.length===1,'XLS 基础模型不正确');
+  const title=cell(root,'A1');assert(title?.colSpan===4,'合并标题未显示');
+  const titleStyle=getComputedStyle(textNode(title));
+  near(parseFloat(titleStyle.fontSize),32,'宋体 24pt 标题未按 32px 显示',0.2);
+  assert(titleStyle.fontFamily.includes('宋体'),'标题字体未还原');
+  assert(getComputedStyle(title).textAlign==='center','标题未水平居中');
+  assert(getComputedStyle(title).verticalAlign==='middle','标题未垂直居中');
+  const header=cell(root,'A2'),style=getComputedStyle(header),headerText=getComputedStyle(textNode(header));
+  assert(Number(headerText.fontWeight)>=600,'表头粗体丢失');
+  assert(style.backgroundColor==='rgb(232, 241, 255)','表头自定义调色板填充丢失');
+  assert(style.borderTopColor==='rgb(0, 0, 0)'&&parseFloat(style.borderTopWidth)>0,'黑色表格边框丢失');
+  assert(style.textAlign==='center'&&style.verticalAlign==='middle','表头对齐丢失');
+}));
+
+await check('XLS 行高列宽、空白样式格与自定义数字格式被显示',()=>withViewer(async(viewer,root)=>{
+  const model=await viewer.open(await file('styled.xls')),sheet=model.sheets[0];
+  const rows=[...root.querySelectorAll('.op-grid tbody tr')];
+  [48,40,32].forEach((height,index)=>near(rows[index].getBoundingClientRect().height,height,`第${index+1}行高度`));
+  const columns=[...root.querySelectorAll('.op-grid thead th')].slice(1);
+  assert(sheet.columnWidths?.length>=4,'没有读取列宽');
+  for(let index=0;index<4;index++)near(columns[index].getBoundingClientRect().width,sheet.columnWidths[index],`第${index+1}列宽度`,2.5);
+  assert(cell(root,'B3')?.textContent==='000042','前导零格式未显示');
+  assert(cell(root,'C3')?.textContent==='2025-12-09','Excel 日期格式未显示');
+  assert(cell(root,'D3')?.textContent==='12.50%','百分比格式未显示');
+  const blank=cell(root,'C4');assert(blank&&blank.textContent==='','带格式的空白单元格丢失');
+  assert(getComputedStyle(blank).backgroundColor==='rgb(232, 241, 255)','空白格的填充丢失');
+}));
+
+await check('XLS XF 继承与 FontIndex 4 跳号不导致错误字体',()=>withViewer(async(viewer,root)=>{
+  await viewer.open(await file('styled.xls'));
+  const inherited=getComputedStyle(textNode(cell(root,'A4')));
+  assert(inherited.fontFamily.includes('宋体')&&!inherited.fontFamily.includes('Courier'),'父 XF 字体未正确继承');
+  near(parseFloat(inherited.fontSize),16,'父 XF 字号未继承',0.2);
+  const skipped=getComputedStyle(textNode(cell(root,'B4')));
+  assert(skipped.fontFamily.includes('Arial')&&skipped.fontStyle==='italic','FontIndex 5 未映射第五个 FONT');
+  assert(skipped.color==='rgb(196, 59, 68)','字体调色板颜色丢失');
+}));
+
+await check('PPT Pictures 图片、填充色、母版背景与独立文本定位被显示',()=>withViewer(async(viewer,root)=>{
+  const model=await viewer.open(await file('styled.ppt'));
+  near(model.width,960,'幻灯片宽度',0.01);near(model.height,540,'幻灯片高度',0.01);
+  assert(model.slides.length===2,'PPT 页面数量不正确');
+  const slide=root.querySelector('.op-slide');assert(getComputedStyle(slide).backgroundColor==='rgb(243, 247, 252)','母版背景色未继承');
+  const picture=root.querySelector('.op-slide-image');assert(picture?.getAttribute('src')?.startsWith('blob:'),'PPT Pictures 流未解码成内嵌图片');
+  await wait(()=>picture.complete&&picture.naturalWidth>0);
+  assert(picture.naturalWidth===4&&picture.naturalHeight===4,'PPT PNG 图像内容未解码');
+  near(parseFloat(picture.style.left),70,'图片横坐标');near(parseFloat(picture.style.top),200,'图片纵坐标');
+  near(parseFloat(picture.style.width),400,'图片宽度');near(parseFloat(picture.style.height),240,'图片高度');
+  const banner=[...root.querySelectorAll('.op-slide-shape')].find(node=>getComputedStyle(node).backgroundColor==='rgb(24, 76, 76)'&&parseFloat(node.style.width)>800);
+  assert(banner,'标题矩形填充丢失');near(parseFloat(banner.style.left),60,'矩形横坐标');near(parseFloat(banner.style.top),52,'矩形纵坐标');
+  const texts=[...root.querySelectorAll('.op-slide-text')],title=texts.find(node=>node.textContent.includes('旧版 PPT 图片与颜色'));
+  assert(title&&texts.filter(node=>node.textContent.includes('旧版 PPT 图片与颜色')).length===1,'定位标题被遗漏或重复堆叠');
+  const titleRun=[...title.querySelectorAll('span')].find(node=>node.textContent.includes('旧版 PPT 图片与颜色'))||title;
+  near(parseFloat(getComputedStyle(titleRun).fontSize),26*4/3,'PPT 原始字号',0.2);
+  assert(getComputedStyle(titleRun).color==='rgb(255, 255, 255)'&&Number(getComputedStyle(titleRun).fontWeight)>=600,'PPT 字体色或粗体丢失');
+  const subtitle=texts.find(node=>node.textContent.includes('图片、文字和形状'));
+  assert(subtitle&&parseFloat(subtitle.style.left)>=500,'独立文本框未按原始位置显示');
+}));
+
+await check('PPT 翻页后保留另一页的独立颜色与布局',()=>withViewer(async(viewer,root)=>{
+  await viewer.open(await file('styled.ppt'));
+  const slot=root.querySelectorAll('.op-slide-page')[1];slot.scrollIntoView({block:'start'});await wait(()=>slot.dataset.ready==='true');
+  const slide=slot.querySelector('.op-slide');assert(getComputedStyle(slide).backgroundColor==='rgb(255, 243, 233)','第二页独立背景色丢失');
+  assert([...root.querySelectorAll('.op-slide-shape')].some(node=>getComputedStyle(node).backgroundColor==='rgb(213, 109, 53)'),'第二页橙色形状丢失');
+  assert(slide.textContent.includes('第二页仍保留颜色和布局')&&!slide.textContent.includes('旧版 PPT 图片与颜色'),'翻页内容没有更新');
+}));
+
+await check('PPT 小字号按自身字体计算百分比行距，并允许文档默认的纵向溢出',async()=>{
+  const host=document.createElement('div');host.className='viewer';area.append(host);
+  const root=host.attachShadow({mode:'open'}),style=document.createElement('style');style.textContent=viewerStyles;
+  const auxiliary=document.createElement('div'),viewport=document.createElement('div'),content=document.createElement('div');
+  auxiliary.className='op-auxiliary';viewport.className='op-viewport';content.className='op-content';viewport.append(content);root.append(style,auxiliary,viewport);
+  const rendered=renderModel({kind:'presentation',format:'ppt',width:400,height:200,slides:[{name:'小字号段落',elements:[{
+    type:'text',x:10,y:10,width:300,height:20,fontSize:24,
+    paragraphs:[{runs:[{text:'小字号文本',fontSize:14}],lineHeight:1.3}]
+  }]}]},viewport,content,auxiliary);
+  try{
+    await rendered.ready;
+    const paragraph=root.querySelector('.op-slide-paragraph'),frame=root.querySelector('.op-slide-text'),computed=getComputedStyle(paragraph);
+    near(parseFloat(computed.fontSize),14,'段落未使用自身 14px 字号',0.1);
+    near(parseFloat(computed.lineHeight),21.84,'段落百分比行距未以 14px × 正常行高1.2 × 1.3 计算',0.2);
+    const box=paragraph.getBoundingClientRect(),frameBox=frame.getBoundingClientRect();
+    assert(box.height<23,'小字号行盒仍被父级24px字号撑高');
+    assert(box.bottom>frameBox.bottom&&getComputedStyle(frame).overflow==='visible','默认纵向溢出被错误裁切');
+  }finally{rendered.dispose();host.remove();}
+});
+
+window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};
+document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';
+document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length} · 旧格式样式`;
+output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);
+</script></body></html>

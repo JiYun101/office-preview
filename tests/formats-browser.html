@@ -1,0 +1,94 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDF / Outlook / native bridge checks</title><style>body{font:14px/1.6 system-ui;margin:24px}pre{white-space:pre-wrap}.viewer{height:600px;width:1000px}iframe{width:1000px;height:600px}</style></head><body><h1>PDF / Outlook / macOS JS 协议验证</h1><p>验证共享内核和原生桥协议；不代表 macOS / WKWebView 真机验收。</p><label>选择 fixtures 中的 sample.pdf、sample.eml、sample.msg：<input id="fixture-files" type="file" multiple accept=".pdf,.eml,.msg"></label><pre id="results">检查中…</pre><div id="area"></div><script type="module">
+import { OfficePreview } from '../src/index.js';
+import { renderPdf } from '../src/render-pdf.js';
+const results = [], area = document.querySelector('#area'), output = document.querySelector('#results');
+const assert = (condition, message) => { if (!condition) throw new Error(message); };
+const wait = async predicate => { const end = Date.now() + 10000; while (Date.now() < end) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 20)); } throw new Error('等待界面完成超时'); };
+async function check(name, action) { try { await action(); results.push({name,ok:true}); } catch (error) { results.push({name,ok:false,error:error.stack || error.message}); } output.textContent = JSON.stringify(results,null,2); }
+async function file(name) { await wait(()=>document.querySelector('#fixture-files').files.length>0); const file=[...document.querySelector('#fixture-files').files].find(file=>file.name===name); assert(file, '缺少本地开发样本：'+name); return file; }
+async function withViewer(action) { const container = document.createElement('div'); container.className = 'viewer'; area.append(container); const viewer = new OfficePreview(container); const root = container.firstElementChild.shadowRoot; try { await action(viewer,root); } finally { viewer.destroy(); container.remove(); } }
+
+await check('PDF 经过 Worker 解析并由自研 Canvas 渲染', () => withViewer(async (viewer,root) => {
+  const model = await viewer.open(await file('sample.pdf'));
+  assert(model.kind === 'pdf' && model.pages.length >= 2,'PDF 多页模型缺失');
+  assert(model.pages[0].operations.some(operation => operation.type === 'text'),'PDF 未解析文字指令');
+  const canvas = root.querySelector('.op-pdf-page');
+  assert(canvas?.dataset.ready === 'true','PDF load 事件早于实际页面绘制');
+  assert(!root.querySelector('iframe,object,embed'),'PDF 借用了内置文档查看器');
+  const data = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+  let colored = 0;
+  for (let i=0;i<data.length;i+=4) if (data[i]<230 || data[i+1]<230 || data[i+2]<230) colored++;
+  assert(colored>100,'PDF 页面没有实际绘制出文字或图形');
+}));
+await check('PDF 通过滚动读取末页且无翻页控件', () => withViewer(async (viewer,root) => {
+  await viewer.open(await file('sample.pdf'));
+  const slot=root.querySelector('.op-pdf-slot:last-child');root.querySelector('.op-viewport').scrollTop=root.querySelector('.op-viewport').scrollHeight;
+  await wait(()=>slot.querySelector('canvas')?.dataset.ready==='true');
+  assert(slot.querySelector('canvas').getAttribute('aria-label')==='PDF 第 2 页','PDF滚动页错位');
+  assert(![...root.querySelectorAll('button')].some(button=>button.textContent==='下一页'),'PDF仍带翻页控件');
+}));
+await check('PDF 图片绘制等待期间可立即取消打开', () => withViewer(async (viewer,root) => {
+  const NativeWorker = window.Worker, nativeDecode = Image.prototype.decode;
+  let decodeStarted = false, rejectDecode;
+  window.Worker = class extends NativeWorker {
+    constructor(...args) { super(...args); this.addEventListener('message',event=>{
+      if (event.data.model?.kind==='pdf') event.data.model.pages[0].operations.unshift({type:'image',mime:'image/jpeg',bytes:new Uint8Array([255,216,255,217]),width:1,height:1});
+    }); }
+  };
+  Image.prototype.decode = function() { decodeStarted=true; return new Promise((_,reject)=>{rejectDecode=reject;}); };
+  try {
+    const pending = viewer.open(await file('sample.pdf')).then(()=>null,error=>error);
+    await wait(()=>decodeStarted);
+    await viewer.open(new File(['item,value\nNEWEST,1'],'new.csv'));
+    const outcome = await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve({name:'Timeout'}),1000))]);
+    assert(outcome?.name==='AbortError','取消仍在等待旧 PDF 图片解码完成');
+    rejectDecode(new Error('obsolete image decode'));
+    await new Promise(resolve=>setTimeout(resolve,20));
+    assert(viewer.getDocument()?.name==='new.csv' && root.querySelector('.op-grid')?.textContent.includes('NEWEST'),'旧 PDF 错误破坏了新文档');
+  } finally { window.Worker=NativeWorker; Image.prototype.decode=nativeDecode; rejectDecode?.(new Error('test cleanup')); }
+}));
+for (const format of ['eml','msg']) await check(`${format.toUpperCase()} 单封邮件经过 Worker 渲染`, () => withViewer(async (viewer,root) => {
+  const model = await viewer.open(await file(`sample.${format}`));
+  assert(model.kind === 'email' && model.subject && model.text,'邮件主题或正文缺失');
+  assert(root.querySelector('.op-email-subject')?.textContent === model.subject,'邮件主题未显示');
+  assert(root.querySelector('.op-email-body')?.textContent === model.text,'邮件正文未完整显示');
+  assert(model.attachments.length>0 && root.querySelectorAll('.op-email-attachments li').length === model.attachments.length,'邮件附件清单缺失');
+}));
+await check('邮件 HTML 与主题中的活动内容不执行', () => withViewer(async (viewer,root) => {
+  window.__emailXss = 0;
+  const script = '<scr'+'ipt>parent.__emailXss=1</scr'+'ipt>';
+  const source = 'From: sender@example.com\r\nTo: recipient@example.com\r\nSubject: <img src=x onerror=parent.__emailXss=2>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>安全正文</p>'+script+'<img src="https://untrusted.invalid/track">';
+  await viewer.open(new File([source],'untrusted.eml'));
+  assert(root.querySelector('.op-email-body').textContent.includes('安全正文'),'HTML 转文字丢失正文');
+  assert(!root.querySelector('.op-email').querySelector('script,img,iframe,object,svg'),'邮件内容被作为活动 HTML');
+  assert(window.__emailXss === 0,'邮件脚本被执行'); delete window.__emailXss;
+}));
+await check('PST / OST 明确区分邮箱存档与单封邮件', () => withViewer(async viewer => {
+  for (const format of ['pst','ost']) {
+    let error;
+    try { await viewer.open(new File(['mail store'],`archive.${format}`)); } catch (failure) { error = failure; }
+    assert(error?.message.includes('邮箱存档') && error.message.includes('EML'),'邮箱存档没有明确能力边界');
+  }
+}));
+await check('原生 JS 桥就绪、base64 打开与加载事件', async () => {
+  const iframe = document.createElement('iframe'); iframe.src = './native-bridge.html'; area.append(iframe);
+  try {
+    await wait(() => iframe.contentWindow.nativeMessages?.some(message => message.type === 'office-preview:ready'));
+    const target = iframe.contentWindow;
+    assert(typeof target.officePreview.openBase64 === 'function','ready 先于 API 注册');
+    const data = new TextEncoder().encode('类型,内容\nmacOS,本地桥接');
+    const base64 = btoa(String.fromCharCode(...data));
+    const summary = await target.officePreview.openBase64(base64,'Mac 本地.csv');
+    assert(summary.name === 'Mac 本地.csv' && summary.kind === 'spreadsheet','原生调用未返回加载摘要');
+    assert(target.nativeMessages.some(message => message.type === 'office-preview:loaded' && message.name === 'Mac 本地.csv'),'缺少原生 loaded 事件');
+    assert(target.officePreview.getCapabilities().some(item => item.formats.includes('pdf')),'原生桥未报告 PDF 能力');
+    try { await target.officePreview.openBase64(btoa('unknown'),'file.pst'); } catch {}
+    assert(target.nativeMessages.some(message => message.type === 'office-preview:error' && message.error.includes('邮箱存档')),'缺少原生 error 事件');
+  } finally { iframe.remove(); }
+});
+
+window.officeBrowserTestResults = {total:results.length,passed:results.every(result=>result.ok),results};
+document.documentElement.dataset.status = results.every(result=>result.ok) ? 'pass' : 'fail';
+document.title = `${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;
+output.textContent = JSON.stringify(window.officeBrowserTestResults,null,2);
+</script></body></html>
