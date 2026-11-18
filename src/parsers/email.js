@@ -238,7 +238,7 @@ function mimePart(entity, state, depth = 0) {
   if (attachment) {
     if (state.attachments.length >= MAX_PARTS) throw new Error('邮件附件数量超过当前 1000 项预览上限。');
     state.attachments.push({ name: filename || `附件${state.attachments.length + 1}${type.value === 'message/rfc822' ? '.eml' : ''}`, size: bytes.length, mime: type.value || 'application/octet-stream', bytes });
-    if (/pkcs7|pgp|x-tnef/.test(type.value)) warn(state.warnings, '部分附件为加密、签名或 TNEF 封装，仅列出原始附件，未解密或展开。');
+    if (/pkcs7|pgp|x-tnef/.test(type.value)) warn(state.warnings, '部分附件为加密、签名或 TNEF 封装，可下载原始附件，未解密或展开。');
     return { text: '', rank: 0 };
   }
   let text = charsetText(bytes, type.params.get('charset'), state.warnings).replace(/\r\n/g, '\n');

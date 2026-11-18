@@ -32,7 +32,7 @@ function label(value, format, warnings) {
 
 export function createWordNumbering(parts, rels, styles, warnings) {
   const path = relatedPath(rels, 'numbering'), document = path ? xmlPart(parts, path) : null;
-  const abstracts = new Map(), numbers = new Map(), counters = new Map();
+  const abstracts = new Map(), numbers = new Map();
   const level = node => ({
     start: numberAttr(first(node, 'start'), 'val', 1),
     format: attr(first(node, 'numFmt'), 'val') || 'decimal',
@@ -57,7 +57,7 @@ export function createWordNumbering(parts, rels, styles, warnings) {
     numbers.set(attr(node, 'numId'), levels);
   }
   return {
-    next(properties) {
+    next(properties, counters) {
       if (!properties?.numId || properties.numId === '0') return null;
       const levels = numbers.get(properties.numId), index = properties.level || 0, current = levels?.get(index);
       if (!current) { warn(warnings, '部分 Word 编号引用的定义缺失，未生成前缀。'); return null; }

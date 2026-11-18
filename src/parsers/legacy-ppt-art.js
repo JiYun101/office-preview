@@ -4,6 +4,7 @@ import { readLegacyFillPaint, legacyCornerRadius } from './legacy-ppt-paint.js';
 import { readZip } from '../containers/zip.js';
 import { parseXml } from '../xml.js';
 import { readDrawingColor, cssColor, readLinearFill } from './ooxml-paint.js';
+import { colorOpacity } from '../slide-paint.js';
 
 // Object identity keeps compatibility ZIPs private; they never enter the model
 // sent from the worker to the host. The async entry consumes and deletes them.
@@ -12,6 +13,41 @@ const roundtripData = new WeakMap();
 const UNIT = 6; // MS-PPT master units are 1/576 inch; CSS pixels are 1/96 inch.
 const hex = value => `#${[value & 255, value >>> 8 & 255, value >>> 16 & 255].map(component => component.toString(16).padStart(2, '0')).join('')}`;
 const signed = value => value | 0;
+
+function tableFromCellAnchors(cells, matrix) {
+  if (!cells.length || !Object.values(matrix).every(Number.isFinite) || matrix.sx <= 0 || matrix.sy <= 0) return null;
+  // MS-ODRAW 2.3.4.36 marks table groups. The child anchors are the
+  // laid-out cell rectangles, including the combined area of merged cells.
+  const edges = (start, end) => [...new Set(cells.flatMap(({ bounds }) => [bounds[start], bounds[end]]))].sort((a, b) => a - b);
+  const xs = edges('left', 'right'), ys = edges('top', 'bottom');
+  const columnCount = xs.length - 1, rowCount = ys.length - 1;
+  const area = rowCount * columnCount;
+  if (area > 50000) return null;
+  const columnAt = new Map(xs.map((x, i) => [x, i])), rowAt = new Map(ys.map((y, i) => [y, i]));
+  const used = new Uint8Array(area);
+  const columns = xs.slice(1).map((x, i) => (x - xs[i]) * matrix.sx);
+  const rows = ys.slice(1).map((y, i) => ({ height: (y - ys[i]) * matrix.sy, cells: [] }));
+  let occupied = 0;
+  for (const { bounds, style } of cells) {
+    const column = columnAt.get(bounds.left), row = rowAt.get(bounds.top);
+    const endCol = columnAt.get(bounds.right), endRow = rowAt.get(bounds.bottom);
+    for (let r = row; r < endRow; r++) for (let c = column; c < endCol; c++) {
+      const index = r * columnCount + c;
+      if (used[index]) return null;
+      used[index] = 1;
+      occupied++;
+    }
+    Object.assign(style, { column, colSpan: endCol - column, rowSpan: endRow - row });
+    rows[row].cells.push(style);
+  }
+  if (occupied !== area) return null;
+  for (const row of rows) row.cells.sort((a, b) => a.column - b.column);
+  return {
+    type: 'table', x: xs[0] * matrix.sx + matrix.tx, y: ys[0] * matrix.sy + matrix.ty,
+    width: (xs.at(-1) - xs[0]) * matrix.sx, height: (ys.at(-1) - ys[0]) * matrix.sy,
+    columns, rows,
+  };
+}
 
 export function createPptArtReader(context) {
   const { source, header, children, document, compound, persists, warnings } = context;
@@ -187,7 +223,7 @@ export function createPptArtReader(context) {
     const shapeProperties = new Map(masterProperties);
     const outline = entry.blocks || [];
     let positioned = 0;
-    const renderShape = (record, matrix, group = false) => {
+    const renderShape = (record, matrix, group = false, tableCells) => {
       const records = children(record), sp = records.find(record => record.type === 0xf00a);
       if (!sp || sp.length < 8) return;
       const shapeFlags = source.u32(sp.data + 4);
@@ -216,6 +252,10 @@ export function createPptArtReader(context) {
       const stroke = flag(props, 0x01ff, 0x08, shapeType !== 202) ? color(value(props, 0x01c0, 0), scheme) : undefined;
       const imageProperty = props.get(0x0104) || props.get(0x0186);
       const bitmap = imageProperty?.complex ? blip(imageProperty.bytes, 0) : imageProperty?.value ? image(imageProperty.value) : null;
+      const firstElement = elements.length;
+      const tableCell = tableCells && !isBackground && [0, 1, 202].includes(shapeType) && anchorRecord?.type === 0xf00f &&
+        bounds.left < bounds.right && bounds.top < bounds.bottom && !bitmap && !fillPaint && !rotation && !common.flipH && !common.flipV;
+      const paragraphs = tableCell ? [] : null;
       if (value(props, 0x0180, 0) && ![2, 3, 4, 7].includes(value(props, 0x0180, 0))) warn(warnings, 'PPT 路径渐变、图案等填充当前使用基础颜色近似显示。');
       if (!isBackground && (!bitmap || ownProperties.has(0x0181) || ownProperties.has(0x01c0)) && (fill !== 'transparent' || stroke)) {
         const shape = { 1: 'rect', 2: 'roundRect', 3: 'ellipse', 20: 'line', 32: 'line', 202: 'rect' }[shapeType] || 'rect';
@@ -233,18 +273,37 @@ export function createPptArtReader(context) {
         const crop = { top: signed(value(props, 0x0100, 0)) / 65536, bottom: signed(value(props, 0x0101, 0)) / 65536, left: signed(value(props, 0x0102, 0)) / 65536, right: signed(value(props, 0x0103, 0)) / 65536 };
         elements.push({ type: 'image', ...common, ...bitmap, ...(Object.values(crop).some(Boolean) ? { crop } : {}) });
       }
+      const left = value(props, 0x0081, 91440) / 9525, top = value(props, 0x0082, 45720) / 9525;
+      const right = value(props, 0x0083, 91440) / 9525, bottom = value(props, 0x0084, 45720) / 9525;
+      const anchor = value(props, 0x0087, 0), verticalAlign = ['top', 'middle', 'bottom'][anchor % 3] || 'top';
       for (const textbox of records.filter(record => record.type === 0xf00d)) {
         const text = textReader.readBox(textbox, outline, scheme, defaults);
         if (!text?.runs.some(run => run.text)) continue;
-        const left = value(props, 0x0081, 91440) / 9525, top = value(props, 0x0082, 45720) / 9525;
-        const right = value(props, 0x0083, 91440) / 9525, bottom = value(props, 0x0084, 45720) / 9525;
-        const anchor = value(props, 0x0087, 0), verticalAlign = ['top', 'middle', 'bottom'][anchor % 3] || 'top';
+        if (paragraphs) for (const paragraph of text.paragraphs) paragraphs.push(paragraph);
         const { flipH, flipV, ...textPosition } = common;
         const element = { type: 'text', ...textPosition, x: common.x + left, y: common.y + top, width: Math.max(0, common.width - left - right), height: Math.max(0, common.height - top - bottom), fontSize: 24, color: scheme[1], fontFamily: fonts[0], verticalAlign, ...text };
         elements.push(element);
         const metro = props.get(0x03a9);
         if (metro?.complex) roundtripData.set(element, { bytes: metro.bytes, scheme, outer: common });
         positioned++;
+      }
+      if (tableCell) {
+        const width = value(props, 0x01cb, 9525) / 9525;
+        const lineColor = colorOpacity(stroke, value(props, 0x01c1, 65536) / 65536);
+        const border = lineColor && width > 0 ? `${width}px solid ${lineColor}` : undefined;
+        const drawn = elements.slice(firstElement), style = {
+          paragraphs, fill: colorOpacity(fill, value(props, 0x0182, 65536) / 65536),
+          fontSize: 24, color: scheme[1], fontFamily: fonts[0], verticalAlign,
+          padding: [top, right, bottom, left].map(value => Math.max(0, value)),
+          borders: { top: border, right: border, bottom: border, left: border },
+        };
+        const text = drawn.filter(element => element.type === 'text');
+        const metadata = text.length === 1 ? roundtripData.get(text[0]) : null;
+        if (metadata) {
+          style.runs = text[0].runs;
+          roundtripData.set(style, { bytes: metadata.bytes, scheme, tableCell: true });
+        }
+        tableCells.push({ bounds, drawn, style });
       }
     };
     const drawing = (record, matrix = rootMatrix, nesting = 0) => {
@@ -253,19 +312,37 @@ export function createPptArtReader(context) {
       if (record.type === 0xf003) {
         const records = children(record), head = records.find(record => record.type === 0xf004);
         let childMatrix = matrix;
+        let tableCells;
         if (head) {
           const headRecords = children(head), groupBounds = headRecords.find(record => record.type === 0xf009);
+          const groupProperties = properties(headRecords);
           const anchor = headRecords.find(record => record.type === 0xf00f) || headRecords.find(record => record.type === 0xf010);
           if (groupBounds && anchor) {
             const from = rect(groupBounds), to = mapRect(rect(anchor), anchor.type === 0xf010 ? rootMatrix : matrix);
             if (from.right === from.left || from.bottom === from.top) throw new Error('PPT 绘图组坐标范围为空。');
             childMatrix = { sx: to.width / (from.right - from.left), sy: to.height / (from.bottom - from.top), tx: 0, ty: 0 };
             childMatrix.tx = to.x - from.left * childMatrix.sx; childMatrix.ty = to.y - from.top * childMatrix.sy;
-            if (value(properties(headRecords), 4, 0)) warn(warnings, 'PPT 旋转组合图形中的子对象尚未完整还原。');
+            if (value(groupProperties, 4, 0)) warn(warnings, 'PPT 旋转组合图形中的子对象尚未完整还原。');
           }
+          if (value(groupProperties, 0x039f, 0) & 1) tableCells = [];
           renderShape(head, matrix, true);
         }
-        for (const child of records) if (child !== head) drawing(child, childMatrix, nesting + 1);
+        const start = elements.length;
+        for (const child of records) {
+          if (child === head) continue;
+          if (tableCells && child.type === 0xf004) renderShape(child, childMatrix, false, tableCells);
+          else drawing(child, childMatrix, nesting + 1);
+        }
+        if (tableCells) {
+          const table = tableFromCellAnchors(tableCells, childMatrix);
+          const replaced = new Set(tableCells.flatMap(cell => cell.drawn));
+          const otherShapes = elements.slice(start).filter(element => !replaced.has(element));
+          if (table && otherShapes.every(element => element.type === 'shape' && element.shape === 'line')) {
+            elements.length = start;
+            elements.push(table);
+            for (const element of otherShapes) elements.push(element);
+          } else warn(warnings, '部分旧版 PPT 表格的网格无法恢复，保留原有形状与文字。');
+        }
       } else if (record.version === 15) for (const child of children(record)) drawing(child, matrix, nesting + 1);
     };
     for (const record of records.filter(record => record.type === 0x040c)) drawing(record);
@@ -353,7 +430,9 @@ function metroParagraphs(body, element, theme, warnings) {
 export async function enrichPptRoundtrip(model) {
   const cache = new Map();
   let expanded = 0;
-  for (const slide of model.slides || []) for (const element of slide.elements || []) {
+  const elements = (model.slides || []).flatMap(slide => (slide.elements || []).flatMap(element =>
+    element.type === 'table' ? element.rows.flatMap(row => row.cells) : [element]));
+  for (const element of elements) {
     const metadata = roundtripData.get(element);
     if (!metadata) continue;
     roundtripData.delete(element);
@@ -391,7 +470,7 @@ export async function enrichPptRoundtrip(model) {
       }
       continue;
     }
-    if (element.type !== 'text') continue;
+    if (element.type !== 'text' && !metadata.tableCell) continue;
     const body = child(root, 'txBody');
     if (!body) continue;
     const paragraphs = metroParagraphs(body, element, theme, model.warnings);
@@ -405,11 +484,14 @@ export async function enrichPptRoundtrip(model) {
     const properties = child(body, 'bodyPr');
     const anchor = attribute(properties, 'anchor');
     if (anchor) element.verticalAlign = { t: 'top', ctr: 'middle', b: 'bottom' }[anchor] || 'top';
-    if (metadata.outer && properties) {
+    if (properties && (metadata.outer || metadata.tableCell)) {
       const left = number(properties, 'lIns', 91440) / 9525, right = number(properties, 'rIns', 91440) / 9525;
       const top = number(properties, 'tIns', 45720) / 9525, bottom = number(properties, 'bIns', 45720) / 9525;
-      element.x = metadata.outer.x + left; element.y = metadata.outer.y + top;
-      element.width = Math.max(0, metadata.outer.width - left - right); element.height = Math.max(0, metadata.outer.height - top - bottom);
+      if (metadata.tableCell) element.padding = [top, right, bottom, left].map(value => Math.max(0, value));
+      else {
+        element.x = metadata.outer.x + left; element.y = metadata.outer.y + top;
+        element.width = Math.max(0, metadata.outer.width - left - right); element.height = Math.max(0, metadata.outer.height - top - bottom);
+      }
     }
   }
   return model;

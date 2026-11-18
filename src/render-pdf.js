@@ -115,9 +115,11 @@ export function renderPdf(model, viewport, content, auxiliary) {
       else if (operation.type === 'transform') context.transform(...operation.matrix);
       else if (operation.type === 'clip') { trace(context, operation.commands); context.clip(operation.fillRule || 'nonzero'); }
       else if (operation.type === 'path') {
+        if (operation.blend === 'multiply') { context.save(); context.globalCompositeOperation = 'multiply'; }
         trace(context, operation.commands);
         if (operation.fill) { context.globalAlpha = operation.fillOpacity ?? 1; context.fillStyle = operation.fill; context.fill(operation.fillRule || 'nonzero'); }
         if (operation.stroke) { context.globalAlpha = operation.strokeOpacity ?? 1; strokeStyle(context, operation, scale); context.stroke(); }
+        if (operation.blend === 'multiply') context.restore();
       } else if (operation.type === 'text') {
         const mode = operation.textMode ?? 0;
         if (mode === 3 || mode === 7) continue;

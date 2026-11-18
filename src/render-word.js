@@ -21,15 +21,26 @@ export function renderWord(model, viewport, content, auxiliary, tools = {}) {
   };
   const pageScale = page => page.paper.getBoundingClientRect().width / page.spec.width || 1;
 
-  function newPage(force = false) {
-    if (current && !current.body.children.length && !force) return current;
+  function newPage() {
+    if (current && !current.body.children.length) {
+      if (current.sectionIndex === sectionIndex) return current;
+      current.paper.remove(); allPages.pop(); pageCount--;
+    }
     if (++pageCount > 1000) throw new Error('Word 文档分页超过当前 1000 页预览上限。');
+    const previous = allPages.at(-1), section = model.sections?.[sectionIndex];
+    const firstPage = previous?.sectionIndex !== sectionIndex;
+    const number = (firstPage ? section?.pageNumberStart : undefined) ?? ((previous?.number ?? 0) + 1);
+    const variant = firstPage && section?.titlePage ? 'first' : model.evenAndOddHeaders && number % 2 === 0 ? 'even' : 'default';
     const spec = specFor(sectionIndex), paper = node('article', 'op-paper op-word-page'), body = node('div', 'op-word-page-body');
     Object.assign(paper.style, { width: `${spec.width}px`, height: `${spec.height}px`, minHeight: `${spec.height}px`, padding: `${spec.marginTop}px ${spec.marginRight}px ${spec.marginBottom}px ${spec.marginLeft}px` });
-    body.style.minHeight = `${Math.max(1, spec.height - spec.marginTop - spec.marginBottom)}px`;
     paper.dataset.page = String(pageCount); paper.setAttribute('aria-label', `第 ${pageCount} 页`);
     paper.append(body); pages.append(paper);
-    current = { paper, body, spec, height: Math.max(1, spec.height - spec.marginTop - spec.marginBottom) }; allPages.push(current);
+    current = { paper, body, spec, sectionIndex, number }; allPages.push(current);
+    current.header = renderPageArea('header', section?.headers?.[variant], current);
+    current.footer = renderPageArea('footer', section?.footers?.[variant], current);
+    current.height = Math.max(1, spec.height - spec.marginTop - spec.marginBottom);
+    body.style.minHeight = `${current.height}px`;
+    paper.style.height = `${Math.max(spec.height, spec.marginTop + spec.marginBottom + current.height)}px`;
     return current;
   }
   function fontMetrics(element) {
@@ -265,12 +276,29 @@ export function renderWord(model, viewport, content, auxiliary, tools = {}) {
       row.style.height = `${properties.height + extra}px`;
     }
   }
+  function renderPageArea(tag, blocks, page) {
+    if (!blocks?.length) return;
+    const region = node(tag, `op-word-page-${tag}`), { spec, paper, body } = page;
+    const header = tag === 'header', edge = header ? 'top' : 'bottom';
+    const distance = Math.max(0, spec[`${tag}Distance`] ?? 48);
+    Object.assign(region.style, { position: 'absolute', left: `${spec.marginLeft}px`, right: `${spec.marginRight}px`, [edge]: `${distance}px` });
+    for (const block of blocks) region.append(block.type === 'table' ? table(block) : paragraph(block));
+    paper.insertBefore(region, header ? body : null);
+    layoutRows(region);
+    for (const p of region.querySelectorAll('.op-word-paragraph')) layoutParagraph(p, page);
+    const margin = header ? 'marginTop' : 'marginBottom';
+    if (spec[margin] >= 0) {
+      spec[margin] = Math.max(spec[margin], distance + region.getBoundingClientRect().height / pageScale(page));
+      paper.style[header ? 'paddingTop' : 'paddingBottom'] = `${spec[margin]}px`;
+    }
+    return region;
+  }
   function place(element, data) {
     current.body.append(element);
     layoutRows(element);
     if (element.matches('.op-word-paragraph')) layoutParagraph(element, current);
     else for (const p of element.querySelectorAll('.op-word-paragraph')) layoutParagraph(p, current);
-    const limit = hasSaved && savedFlow ? current.spec.height - current.spec.marginTop : current.height;
+    const limit = hasSaved && savedFlow && !current.footer ? current.spec.height - current.spec.marginTop : current.height;
     if (current.body.children.length > 1 && current.body.scrollHeight > limit + 2) {
       const moving = [element];
       let previous = element.previousElementSibling;
@@ -307,8 +335,9 @@ export function renderWord(model, viewport, content, auxiliary, tools = {}) {
     flush();
   }
   const ready = (async () => {
-    newPage(); setColumns();
     await document.fonts.ready;
+    if (disposed) return;
+    newPage(); setColumns();
     let count = 0;
     for (const data of model.blocks || []) {
       if (disposed) return;
@@ -324,10 +353,13 @@ export function renderWord(model, viewport, content, auxiliary, tools = {}) {
       positionFloating(page.body, page);
       // Tall inline pictures may occupy the bottom margin without exceeding
       // the physical sheet. Padding must not enlarge those paper pages.
-      if (page.body.scrollHeight > page.spec.height - page.spec.marginTop + 3) {
+      const limit = page.footer ? page.height : page.spec.height - page.spec.marginTop;
+      if (page.body.scrollHeight > limit + 3) {
         page.paper.dataset.overflow = 'true';
         page.paper.style.height = `${page.spec.marginTop + page.body.scrollHeight + page.spec.marginBottom}px`;
       }
+      if (page.header) positionFloating(page.header, page);
+      if (page.footer) positionFloating(page.footer, page);
     }
     pages.dataset.ready = 'true';
   })();

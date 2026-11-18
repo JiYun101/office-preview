@@ -95,6 +95,28 @@ test('BIFF8 BLANK/MULBLANK keep formatted empty cells and resolved row/column de
   assert.equal(sheet.defaultStyle.fontFamily, '宋体');
 });
 
+test('BIFF8 hidden rows and column ranges retain their cell values and coordinates', () => {
+  const { sheets: [sheet] } = parseLegacy(buildStyledXls({ hidden: true }), 'xls');
+  assert.equal(sheet.hiddenRows[1], true);
+  assert.equal(sheet.hiddenRows[2], false);
+  assert.equal(sheet.hiddenColumns[1], true);
+  assert.equal(sheet.rows[2][1].value, 42);
+  assert.equal(sheet.rows[2][2].value, 46000);
+  assert.equal(sheet.rowHeights[1], 40);
+  assert.equal(sheet.merges[0].endCol, 3);
+});
+
+test('BIFF8 default zero-height hides empty row gaps while formatted rows remain visible', () => {
+  const bytes = editRecords(buildStyledXls(), (type, data) => {
+    if (type === 0x0225) data.writeUInt16LE(data.readUInt16LE(0) | 2);
+    if (type === 0x0200) data.writeUInt32LE(7, 4);
+    if ((type === 0x0208 || type === 0x0201) && data.readUInt16LE(0) === 4) data.writeUInt16LE(6);
+  });
+  const { sheets: [sheet] } = parseLegacy(bytes, 'xls');
+  assert.deepEqual(sheet.hiddenRows, [false, false, false, false, true, true, false]);
+  assert.equal(sheet.rows[6][0].value, '');
+});
+
 test('BIFF8 truncated font strings fail rather than reading neighboring records', () => {
   let changed = false;
   const bytes = editRecords(buildStyledXls(), (type,data) => {

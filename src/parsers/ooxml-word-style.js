@@ -136,5 +136,6 @@ export function createWordStyles(parts, rels, warnings) {
   const defaultRun = { fontSize: 14, color: '#000000', ...run(first(first(defaults, 'rPrDefault'), 'rPr')) };
   const defaultParagraph = { snapToGrid: true, ...paragraph(first(first(defaults, 'pPrDefault'), 'pPr')) };
   const defaultTabStop = numberAttr(elements(settings, 'defaultTabStop')[0], 'val', 720) / 15;
-  return { run, paragraph, resolve, defaultRun, defaultParagraph, defaultParagraphId, defaultCharacterId, defaultTabStop };
+  const evenAndOddHeaders = onOff(first(settings?.documentElement, 'evenAndOddHeaders'));
+  return { run, paragraph, resolve, defaultRun, defaultParagraph, defaultParagraphId, defaultCharacterId, defaultTabStop, evenAndOddHeaders };
 }

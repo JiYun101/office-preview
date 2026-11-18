@@ -111,3 +111,29 @@ test('PDF rejects invalid graphics state values instead of silently losing style
   await assert.rejects(parsePdf(graphicPdf('[0 0] 0 d')), /虚线/);
   await assert.rejects(parsePdf(graphicPdf('/A gs', '/A << /D [[-2 1] 0] >>')), /虚线/);
 });
+
+test('PDF text markup handles both quad orders, rectangle fallback and independent page coordinates', async () => {
+  const model = await parsePdf(assemblePdf({
+    1: '<< /Type /Catalog /Pages 2 0 R >>',
+    2: '<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 200 200] >>',
+    3: '<< /Type /Page /Parent 2 0 R /Rotate 90 /CropBox [10 10 180 190] /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] >>',
+    4: pdfStream('', Buffer.from('2 0 0 2 0 0 cm 0 0 5 5 re W n')),
+    5: '<< /Subtype /Highlight /QuadPoints [20 60 80 60 20 40 80 40] /C [1 0.5 0] /CA 0.5 >>',
+    6: '<< /Subtype /Underline /QuadPoints [20 70 80 70 80 95 20 95] /C [0 0 1] >>',
+    7: '<< /Subtype /Underline /Rect [80 110 20 100] >>',
+    8: '<< /Subtype /Highlight /Rect [20 120 80 140] /F 32 >>',
+    9: '<< /Subtype /Link /Rect [20 150 80 170] /A 999 0 R >>',
+  }));
+  const { operations } = model.pages[0];
+  const overlay = operations.slice(4);
+  assert.deepEqual(overlay.slice(0, 3), [
+    { type: 'restore' }, { type: 'save' }, { type: 'transform', matrix: [0, -1, 1, 0, -10, 180] },
+  ]);
+  assert.deepEqual(overlay.slice(3), [
+    { type: 'path', commands: [['M', 20, 40], ['L', 80, 40], ['L', 80, 60], ['L', 20, 60], ['Z']], fill: '#ff8000', fillOpacity: 0.5, blend: 'multiply' },
+    { type: 'path', commands: [['M', 20, 70], ['L', 80, 70]], stroke: '#0000ff', strokeOpacity: 1, lineWidth: 2 },
+    { type: 'path', commands: [['M', 20, 100], ['L', 80, 100]], stroke: '#000000', strokeOpacity: 1, lineWidth: 0.8 },
+    { type: 'restore' },
+  ]);
+  assert.ok(model.warnings.some(warning => warning.includes('链接热点')));
+});

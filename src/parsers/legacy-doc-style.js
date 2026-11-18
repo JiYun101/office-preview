@@ -1,4 +1,5 @@
 import { binary, utf16, warn } from './legacy-binary.js';
+import { readDocTableParagraph } from './legacy-doc-table.js';
 
 const fixedSizes = [1, 1, 2, 4, 2, 2, -1, 3];
 const alignments = ['left', 'center', 'right', 'justify', 'justify', 'justify', 'left', 'left', 'justify'];
@@ -13,7 +14,7 @@ export function readDocPrls(bytes) {
     const id = data.u16(cursor); cursor += 2;
     let length = fixedSizes[id >>> 13];
     if (length < 0) {
-      if (id === 0xd608 || id === 0xd606) { length = data.u16(cursor); cursor += 2; }
+      if (id === 0xd608 || id === 0xd606) { length = data.u16(cursor) - (id === 0xd608 ? 1 : 0); cursor += 2; }
       else { length = data.u8(cursor++); }
     }
     data.need(cursor, length);
@@ -81,6 +82,12 @@ export function applyDocPrls(base, prls, context = {}) {
       case 0x460b: result._listId = short(); break;
       case 0xc60d: result.tabs = changeTabs(result.tabs, prl.bytes, false); break;
       case 0xc615: result.tabs = changeTabs(result.tabs, prl.bytes, true); break;
+      case 0x300a: result._titlePage = byte() === 1; break;
+      case 0x3011: result._restartPageNumber = byte() === 1; break;
+      case 0x501c: result._pageNumberStart = short(); break;
+      case 0x7044: result._pageNumberStart = data.u32(0); break;
+      case 0xb017: result.headerDistance = short() / 15; break;
+      case 0xb018: result.footerDistance = short() / 15; break;
       case 0xb01f: result.width = short() / 15; break;
       case 0xb020: result.height = short() / 15; break;
       case 0xb021: result.marginLeft = short() / 15; break;
@@ -197,6 +204,25 @@ export function createDocStyleReader(wordBytes, tableBytes, pair, dataBytes, war
     return runs.sort((a, b) => a.start - b.start);
   };
   const characterRuns = readFkps(12, false), paragraphRuns = readFkps(13, true);
+  function tableProperties(prls) {
+    const data = dataBytes && binary(dataBytes);
+    for (let depth = 0; data && depth < 4; depth++) {
+      const first = prls[0];
+      if (!first) break;
+      const huge = prls.length === 1 && [0x6645, 0x6646].includes(first.id);
+      const alternative = first.id === 0x646b && !prls.some(prl => prl.id === 0xd608);
+      if (!huge && !alternative) break;
+      try {
+        const position = binary(first.bytes).u32(0);
+        prls = readDocPrls(data.slice(position + 2, data.u16(position)));
+      } catch (error) {
+        if (huge) throw error;
+        warn(warnings, '部分 DOC 表格属性数据无效，保留可读取的行列标记。');
+        break;
+      }
+    }
+    return readDocTableParagraph(prls, palette);
+  }
   const characterStyle = (index, base, suppressHyperlink, seen = new Set()) => {
     const entry = styles[index];
     if (!entry || entry.kind !== 2) return { ...base };
@@ -229,19 +255,21 @@ export function createDocStyleReader(wordBytes, tableBytes, pair, dataBytes, war
     for (let i = 0; i < n; i++) {
       const start = table.u32(sectionPart.offset + i * 4), end = table.u32(sectionPart.offset + (i + 1) * 4);
       const position = table.u32(sectionPart.offset + (n + 1) * 4 + i * 12 + 2);
-      let page = { width: 816, height: 1056, marginTop: 96, marginRight: 96, marginBottom: 96, marginLeft: 96 };
+      let properties = { width: 816, height: 1056, marginTop: 96, marginRight: 96, marginBottom: 96, marginLeft: 96 };
       if (position !== 0xffffffff) {
         const length = word.u16(position);
-        page = applyDocPrls(page, readDocPrls(word.slice(position + 2, length)), context);
+        properties = applyDocPrls(properties, readDocPrls(word.slice(position + 2, length)), context);
       }
-      sections.push({ start, end, page });
+      const { _titlePage: titlePage, _restartPageNumber: restartPageNumber, _pageNumberStart: pageNumber = 0, ...page } = properties;
+      sections.push({ start, end, page, titlePage, pageNumberStart: restartPageNumber ? pageNumber : undefined });
     }
   }
   return {
     fonts, sections,
     paragraph(fc) {
       const run = find(paragraphRuns, fc), index = run?.style || 0, inherited = resolve(index);
-      return { ...inherited, paragraph: applyDocPrls(inherited.paragraph, run?.prls || [], context), baseParagraph: inherited.paragraph, direct: run?.prls || [], index };
+      if (run && run.table === undefined) run.table = tableProperties(run.prls);
+      return { ...inherited, paragraph: applyDocPrls(inherited.paragraph, run?.prls || [], context), baseParagraph: inherited.paragraph, direct: run?.prls || [], index, ...(run?.table ? { table: run.table } : {}) };
     },
     character(fc, inherited, suppressHyperlink = false) {
       const run = find(characterRuns, fc), prls = run?.prls || [];

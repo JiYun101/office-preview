@@ -1,4 +1,4 @@
-// Display-only BIFF number formats. Values and formula caches remain untouched.
+// Display-only Excel number formats. Values and formula caches remain untouched.
 function sections(format) {
   const result = [''];
   let quoted = false;

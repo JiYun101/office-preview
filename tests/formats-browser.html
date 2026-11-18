@@ -53,6 +53,15 @@ for (const format of ['eml','msg']) await check(`${format.toUpperCase()} 单封�
   assert(root.querySelector('.op-email-subject')?.textContent === model.subject,'邮件主题未显示');
   assert(root.querySelector('.op-email-body')?.textContent === model.text,'邮件正文未完整显示');
   assert(model.attachments.length>0 && root.querySelectorAll('.op-email-attachments li').length === model.attachments.length,'邮件附件清单缺失');
+  const attachment = model.attachments[0], link = root.querySelector('.op-email-attachments a[download]');
+  assert(link?.download === attachment.name && link.href.startsWith('blob:'),'附件下载链接缺失或文件名错误');
+  const result = await fetch(link.href);
+  assert(result.headers.get('Content-Type') === 'application/octet-stream','下载的内容类型取自不可信的邮件字段');
+  const bytes = new Uint8Array(await result.arrayBuffer());
+  assert(bytes.length === attachment.bytes.length && bytes.every((byte, index) => byte === attachment.bytes[index]),'下载内容与原附件不一致');
+  const href = link.href;
+  await viewer.open(new File(['a,b'],'next.csv'));
+  assert(await fetch(href).then(()=>false,()=>true),'切换文件后未释放附件 Blob URL');
 }));
 await check('邮件 HTML 与主题中的活动内容不执行', () => withViewer(async (viewer,root) => {
   window.__emailXss = 0;

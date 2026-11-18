@@ -53,6 +53,33 @@ test('PPT keeps per-shape fills, positions, font family, size, color and paragra
   assert.ok(subtitle.x > title.x + 400, 'separate text boxes must retain separate positions');
 });
 
+test('PPT reconstructs a marked OfficeArt table from native child anchors and keeps its separate borders', () => {
+  const { elements } = parseLegacy(buildStyledPpt(), 'ppt').slides[0];
+  const table = elements.find(element => element.type === 'table');
+  assert.deepEqual([table.x, table.y, table.width, table.height], [520, 340, 360, 136]);
+  assert.deepEqual(table.columns, [80, 130, 150]);
+  assert.deepEqual(table.rows.map(row => row.height), [40, 52, 44]);
+  const heading = table.rows[0].cells[0], left = table.rows[1].cells[0], green = table.rows[1].cells[1];
+  assert.deepEqual([heading.column, heading.colSpan, heading.rowSpan], [0, 2, 1]);
+  assert.equal(heading.paragraphs[0].runs[0].text, '合并表头');
+  assert.deepEqual([left.column, left.colSpan, left.rowSpan], [0, 1, 2]);
+  assert.equal(green.fill, '#22aa44');
+  assert.deepEqual(table.rows[1].cells[2].paragraphs, []);
+  assert.ok(elements.some(element => element.shape === 'line' && element.stroke === '#331155' && element.x === 600 && element.y === 380));
+  assert.ok(!elements.some(element => element.type === 'text' && paragraphText(element) === '合并表头'));
+});
+
+test('PPT keeps its grouped visual fallback when table child anchors overlap', () => {
+  const parts = streams(buildStyledPpt());
+  const ppt = parts['PowerPoint Document'];
+  const anchor = findRecords(ppt, 0xf00f)[1];
+  new DataView(ppt.buffer, ppt.byteOffset, ppt.byteLength).setInt32(anchor.data, 0, true);
+  const model = parseLegacy(makeCompound(parts), 'ppt');
+  assert.ok(!model.slides[0].elements.some(element => element.type === 'table'));
+  assert.ok(model.slides[0].elements.some(element => element.type === 'text' && paragraphText(element) === '合并表头'));
+  assert.ok(model.warnings.some(warning => warning.includes('表格的网格无法恢复')));
+});
+
 test('PPT resolves pib through BSE foDelay into the Pictures stream and retains PNG bytes', () => {
   const model = parseLegacy(buildStyledPpt(), 'ppt');
   const image = model.slides[0].elements.find(element => element.type === 'image');

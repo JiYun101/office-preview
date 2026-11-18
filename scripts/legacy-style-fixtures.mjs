@@ -43,7 +43,7 @@ function xf(fontIndex = 0, format = 0, { style = false, parent = 0, align = 2, v
   return biff(0x00e0, bytes);
 }
 
-export function buildStyledXls() {
+export function buildStyledXls({ hidden = false } = {}) {
   const strings = ['旧版 XLS 格式还原验证', '序号', '代码', '日期', '完成率', '继承字体', '跨过字体索引4'];
   const sst = biff(0x00fc, Buffer.concat([u32(strings.length), u32(strings.length), ...strings.map(value => xlString(value))]));
   const bound = Buffer.concat([u32(0), Buffer.from([0, 0]), xlString('样式验证', true)]);
@@ -68,10 +68,11 @@ export function buildStyledXls() {
   bound.writeUInt32LE(globals().length);
   const dimensions = Buffer.alloc(14); dimensions.writeUInt32LE(5,4); dimensions.writeUInt16LE(4,10);
   const records = [bof(0x10),biff(0x0200,dimensions),biff(0x0225,Buffer.concat([u16(1),u16(360)])),biff(0x0055,u16(9))];
-  [10,18,22,16].forEach((width,col) => records.push(biff(0x007d,Buffer.concat([u16(col),u16(col),u16(width*256),u16(1),u16(0),u16(0)]))));
+  [10,18,22,16].forEach((width,col) => records.push(biff(0x007d,Buffer.concat([u16(col),u16(col),u16(width*256),u16(1),u16(hidden && col === 1 ? 1 : 0),u16(0)]))));
   [720,600,480,450,450].forEach((height,row) => {
     const bytes = Buffer.alloc(16); bytes.writeUInt16LE(row); bytes.writeUInt16LE(4,4); bytes.writeUInt16LE(height,6);
     bytes[12] = 0x40; bytes[13] = 1; bytes.writeUInt16LE(1,14);
+    if (hidden && row === 1) bytes[12] |= 0x20;
     records.push(biff(0x0208,bytes));
   });
   const label = (row,col,style,index) => biff(0x00fd,Buffer.concat([u16(row),u16(col),u16(style),u32(index)]));
@@ -90,8 +91,9 @@ function pptRecord(type, data, version=0, instance=0) {
   return Buffer.concat([header,data]);
 }
 function colorRef(color) { const bytes=Buffer.from(color.replace('#',''),'hex'); return bytes[0] | bytes[1]<<8 | bytes[2]<<16; }
-function properties(values) { const entries=Object.entries(values).map(([id,value])=>Buffer.concat([u16(Number(id)),u32(value)])); return pptRecord(0xf00b,Buffer.concat(entries),3,entries.length); }
+function properties(values,type=0xf00b) { const entries=Object.entries(values).map(([id,value])=>Buffer.concat([u16(Number(id)),u32(value)])); return pptRecord(type,Buffer.concat(entries),3,entries.length); }
 function clientAnchor(x,y,width,height) { const bytes=Buffer.alloc(16); [y,x,x+width,y+height].forEach((value,index)=>bytes.writeInt32LE(value*6,index*4)); return pptRecord(0xf010,bytes); }
+function shapeBounds(x,y,width,height) { return Buffer.concat([x,y,x+width,y+height].map(value=>u32(value*6))); }
 function textRecords(text,{size=26,color='#ffffff',bold=true,align=1,fontIndex=0}={}) {
   const paragraphRuns=text.split('\r').map(paragraph=>Buffer.concat([u32(paragraph.length+1),u16(0),u32(0x800),u16(align)]));
   const characterRun=Buffer.concat([u32(text.length+1),u32(0x70001),u16(bold?1:0),u16(fontIndex),u16(size),Buffer.from([...Buffer.from(color.slice(1),'hex'),0xfe])]);
@@ -99,18 +101,34 @@ function textRecords(text,{size=26,color='#ffffff',bold=true,align=1,fontIndex=0
     pptRecord(0x0f9f,u32(4)),pptRecord(0x0fa0,utf16(text)),pptRecord(0x0fa1,Buffer.concat([...paragraphRuns,characterRun]))
   ]));
 }
-function shape(id,{x,y,width,height,fill='#184c4c',line='#184c4c',text,size=26,textColor='#ffffff',align=1,pib,shapeType=1,fontIndex=0}={}) {
-  const fsp=Buffer.concat([u32(id),u32(0x0a00)]);
-  const options={0x0181:colorRef(fill),0x01c0:colorRef(line),0x01cb:9525,0x01bf:0x00100010,0x01ff:0x00080008};
+function shape(id,{x,y,width,height,fill='#184c4c',line='#184c4c',text,size=26,textColor='#ffffff',align=1,pib,shapeType=1,fontIndex=0,inGroup=false}={}) {
+  const fsp=Buffer.concat([u32(id),u32(inGroup?0x0a02:0x0a00)]);
+  const options={0x0181:colorRef(fill),0x01cb:9525,0x01bf:0x00100010,0x01ff:line?0x00080008:0x00080000};
+  if(line) options[0x01c0]=colorRef(line);
   if(pib) options[0x4104]=pib;
-  const records=[pptRecord(0xf00a,fsp,2,shapeType),properties(options),clientAnchor(x,y,width,height)];
+  const anchor=inGroup?pptRecord(0xf00f,shapeBounds(x,y,width,height)):clientAnchor(x,y,width,height);
+  const records=[pptRecord(0xf00a,fsp,2,shapeType),properties(options),anchor];
   if(text) records.push(textRecords(text,{size,color:textColor,align,fontIndex}));
   return pptRecord(0xf004,Buffer.concat(records),15);
 }
-function drawing(drawingId,shapes) {
+function tableGroup(id) {
+  const header=pptRecord(0xf004,Buffer.concat([
+    pptRecord(0xf009,shapeBounds(0,0,360,136),1),pptRecord(0xf00a,Buffer.concat([u32(id),u32(0x0201)]),2),
+    properties({0x039f:1},0xf122),clientAnchor(520,340,360,136),
+  ]),15);
+  const cells=[
+    [0,0,210,40,'合并表头','#245aa4'], [210,0,150,40,'说明','#245aa4'],
+    [0,40,80,96,'纵向合并','#4472c4'], [80,40,130,52,'绿色单元格','#22aa44'], [210,40,150,52,'','#437bb7'],
+    [80,92,130,44,'数据','#4472c4'], [210,92,150,44,'末格','#4472c4'],
+  ].map(([x,y,width,height,text,fill],index)=>shape(id+index+1,{x,y,width,height,text,fill,line:null,size:12,inGroup:true}));
+  const border=shape(id+8,{x:80,y:40,width:130,height:0,shapeType:20,line:'#331155',inGroup:true});
+  return pptRecord(0xf003,Buffer.concat([header,...cells,border]),15);
+}
+function drawing(drawingId,shapes,nestedShapes=0) {
   const groupBounds=Buffer.alloc(16); groupBounds.writeInt32LE(5760,8); groupBounds.writeInt32LE(3240,12);
   const rootShape=pptRecord(0xf004,Buffer.concat([pptRecord(0xf009,groupBounds,1),pptRecord(0xf00a,Buffer.concat([u32(drawingId*1024),u32(5)]),2)]),15);
-  const dg=pptRecord(0xf008,Buffer.concat([u32(shapes.length+1),u32(drawingId*1024+shapes.length)]),0,drawingId);
+  const count=shapes.length+1+nestedShapes;
+  const dg=pptRecord(0xf008,Buffer.concat([u32(count),u32(drawingId*1024+count-1)]),0,drawingId);
   return pptRecord(0x040c,pptRecord(0xf002,Buffer.concat([dg,pptRecord(0xf003,Buffer.concat([rootShape,...shapes]),15)]),15),15);
 }
 function scheme(background) { return pptRecord(0x07f0,Buffer.concat([background,'#184c4c','#777777','#184c4c','#dce9f5','#d56d35','#437bb7','#2f8668'].map(color=>u32(colorRef(color)))),0,1); }
@@ -150,8 +168,8 @@ export function buildStyledPpt({embeddedBlip=false}={}) {
   const blip=pptRecord(0xf01e,Buffer.concat([uid,Buffer.from([0xff]),png]),0,0x06e0);
   const bse=Buffer.alloc(36); bse[0]=bse[1]=6; uid.copy(bse,2); bse.writeUInt16LE(0xff,18);
   bse.writeUInt32LE(blip.length,20); bse.writeUInt32LE(1,24); bse.writeUInt32LE(embeddedBlip?0xffffffff:0,28);
-  const dgg=Buffer.alloc(40); dgg.writeUInt32LE(3074); dgg.writeUInt32LE(4,4); dgg.writeUInt32LE(9,8); dgg.writeUInt32LE(3,12);
-  dgg.writeUInt32LE(1,16); dgg.writeUInt32LE(4,20); dgg.writeUInt32LE(2,24); dgg.writeUInt32LE(3,28);
+  const dgg=Buffer.alloc(40); dgg.writeUInt32LE(3074); dgg.writeUInt32LE(4,4); dgg.writeUInt32LE(18,8); dgg.writeUInt32LE(3,12);
+  dgg.writeUInt32LE(1,16); dgg.writeUInt32LE(13,20); dgg.writeUInt32LE(2,24); dgg.writeUInt32LE(3,28);
   dgg.writeUInt32LE(3,32); dgg.writeUInt32LE(2,36);
   const drawingGroup=pptRecord(0x040b,pptRecord(0xf000,Buffer.concat([pptRecord(0xf006,dgg),pptRecord(0xf001,pptRecord(0xf007,embeddedBlip?Buffer.concat([bse,blip]):bse,2,6),15,1)]),15),15);
   const fontCollection=pptRecord(0x07d5,Buffer.concat(['微软雅黑','宋体'].map((name,index)=>{
@@ -168,8 +186,9 @@ export function buildStyledPpt({embeddedBlip=false}={}) {
   const first=pptRecord(0x03ee,Buffer.concat([slideAtom(0x80000000,7),drawing(1,[
     shape(1025,{x:60,y:52,width:840,height:100,text:'旧版 PPT 图片与颜色'}),
     shape(1026,{x:70,y:200,width:400,height:240,pib:1,shapeType:75,fill:'#ffffff',line:'#dce9f5'}),
-    shape(1027,{x:520,y:200,width:360,height:130,shapeType:202,fill:'#f3f7fc',line:'#f3f7fc',text:'图片、文字和形状\r按原始位置显示',size:18,textColor:'#184c4c',align:0})
-  ])]),15);
+    shape(1027,{x:520,y:200,width:360,height:130,shapeType:202,fill:'#f3f7fc',line:'#f3f7fc',text:'图片、文字和形状\r按原始位置显示',size:18,textColor:'#184c4c',align:0}),
+    tableGroup(1028)
+  ],8)]),15);
   const second=pptRecord(0x03ee,Buffer.concat([slideAtom(0x80000000),scheme('#fff3e9'),drawing(2,[
     shape(2049,{x:100,y:100,width:760,height:220,fill:'#d56d35',line:'#d56d35',text:'第二页仍保留颜色和布局',size:28}),
     shape(2050,{x:150,y:360,width:660,height:70,shapeType:202,fill:'#fff3e9',line:'#fff3e9',text:'翻页不会丢失原始绘图数据',size:18,textColor:'#184c4c',align:0,fontIndex:1})
@@ -192,7 +211,7 @@ export function buildStyledPpt({embeddedBlip=false}={}) {
 
 export async function generateStyledFixtures(destination=new URL('../fixtures/',import.meta.url)) {
   await mkdir(destination,{recursive:true});
-  const files={'styled.xls':buildStyledXls(),'styled.ppt':buildStyledPpt()};
+  const files={'styled.xls':buildStyledXls(),'hidden.xls':buildStyledXls({hidden:true}),'styled.ppt':buildStyledPpt()};
   await Promise.all(Object.entries(files).map(([name,bytes])=>writeFile(new URL(name,destination),bytes)));
   return Object.entries(files).map(([name,bytes])=>({name,bytes:bytes.length}));
 }

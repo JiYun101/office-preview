@@ -32,6 +32,7 @@ function runStyle(element, style = {}) {
 
 export function renderModel(model, viewport, content, auxiliary) {
   const urls = new Set();
+  const wordImageUrls = model.kind === 'document' ? new WeakMap() : null;
   let activeUrls = null;
   const image = (data, lazy = false) => {
     const element = node('img');
@@ -40,8 +41,12 @@ export function renderModel(model, viewport, content, auxiliary) {
       const fallback = node('span', '', '〔暂不支持的图片格式〕');
       return fallback;
     }
-    const url = URL.createObjectURL(new Blob([data.bytes], { type: data.mime }));
-    urls.add(url); activeUrls?.add(url); element.src = url; element.alt = '文档内嵌图片';
+    let url = wordImageUrls?.get(data);
+    if (!url) {
+      url = URL.createObjectURL(new Blob([data.bytes], { type: data.mime }));
+      urls.add(url); activeUrls?.add(url); wordImageUrls?.set(data, url);
+    }
+    element.src = url; element.alt = '文档内嵌图片';
     if (data.width) element.style.width = `${data.width}px`;
     if (data.height) element.style.height = `${data.height}px`;
     return element;
@@ -77,6 +82,73 @@ export function renderModel(model, viewport, content, auxiliary) {
     const release = state => {
       for (const url of state.urls) { URL.revokeObjectURL(url); urls.delete(url); }
       state.urls.clear(); state.canvas.replaceChildren(); state.hydrated = false; delete state.slot.dataset.ready;
+    };
+    const slideText = (item, className = 'op-slide-text') => {
+      const element = node('div', className); element.style.fontSize = `${item.fontSize || 24}px`;
+      runStyle(element, item);
+      element.style.overflow = item.verticalOverflow === 'clip' ? 'hidden' : 'visible';
+      if (item.align) element.style.textAlign = item.align;
+      element.style.justifyContent = ({ middle: 'center', center: 'center', bottom: 'flex-end' }[item.verticalAlign]) || 'flex-start';
+      const body = node('div', 'op-slide-text-content');
+      if (item.paragraphs?.length) {
+        for (const paragraph of item.paragraphs) {
+          const p = node('p', 'op-slide-paragraph'); appendRuns(p, paragraph.runs);
+          const sizes = (paragraph.runs || []).map(run => run.fontSize).filter(value => value > 0);
+          const fontSize = sizes.length ? Math.max(...sizes) : item.fontSize || 24;
+          p.style.fontSize = `${fontSize}px`;
+          const family = paragraph.runs?.find(run => run.fontFamily)?.fontFamily;
+          if (family) p.style.fontFamily = fontStack(family);
+          if (paragraph.align) p.style.textAlign = paragraph.align;
+          const normalLine = fontSize * 1.2;
+          const lineHeight = paragraph.lineHeightPx > 0 ? paragraph.lineHeightPx : normalLine * (paragraph.lineHeight > 0 ? paragraph.lineHeight : 1);
+          p.style.lineHeight = `${lineHeight}px`;
+          if (paragraph.lineHeight > 0 && !paragraph.lineHeightPx) {
+            // Keep the extra initial leading rather than letting CSS halve it.
+            const leading = (paragraph.lineHeight - 1) * fontSize - (lineHeight - normalLine) / 2;
+            p.style.position = 'relative'; p.style.top = `${leading}px`;
+          }
+          const before = paragraph.spaceBefore ?? (paragraph.spaceBeforeRatio || 0) * lineHeight;
+          const after = paragraph.spaceAfter ?? (paragraph.spaceAfterRatio || 0) * lineHeight;
+          if (before) p.style.marginTop = `${before}px`;
+          if (after) p.style.marginBottom = `${after}px`;
+          body.append(p);
+        }
+      } else {
+        const sizes = (item.runs || []).map(run => run.fontSize).filter(value => value > 0);
+        if (sizes.length) body.style.fontSize = `${Math.max(...sizes)}px`;
+        appendRuns(body, item.runs);
+      }
+      element.append(body);
+      return element;
+    };
+    const slideTable = item => {
+      const table = node('div', 'op-slide-table'); table.setAttribute('role', 'table');
+      Object.assign(table.style, {
+        position: 'absolute', display: 'grid', color: '#000',
+        gridTemplateColumns: item.columns.map(width => `${width}px`).join(' '),
+        gridTemplateRows: item.rows.map(row => `${row.height}px`).join(' '),
+      });
+      const gridline = item.styled ? '1px solid #d1d5db' : '';
+      item.rows.forEach((row, rowIndex) => {
+        const element = node('div'); element.setAttribute('role', 'row'); element.style.display = 'contents';
+        for (const cell of row.cells) {
+          const box = slideText({ ...cell, fontSize: cell.fontSize ?? 18, verticalOverflow: 'clip' }, 'op-slide-table-cell');
+          box.setAttribute('role', 'cell'); box.setAttribute('aria-colindex', String(cell.column + 1));
+          if (cell.colSpan > 1) box.setAttribute('aria-colspan', String(cell.colSpan));
+          if (cell.rowSpan > 1) box.setAttribute('aria-rowspan', String(cell.rowSpan));
+          Object.assign(box.style, {
+            display: 'flex', flexDirection: 'column', overflowWrap: 'anywhere', minWidth: '0', minHeight: '0',
+            gridRow: `${rowIndex + 1} / span ${cell.rowSpan}`, gridColumn: `${cell.column + 1} / span ${cell.colSpan}`,
+            padding: cell.padding.map(size => `${size}px`).join(' '), backgroundColor: cell.fill || '',
+            borderTop: cell.borders.top || gridline, borderLeft: cell.borders.left || gridline,
+            borderRight: cell.borders.right || (cell.column + cell.colSpan === item.columns.length ? gridline : ''),
+            borderBottom: cell.borders.bottom || (rowIndex + cell.rowSpan === item.rows.length ? gridline : ''),
+          });
+          element.append(box);
+        }
+        table.append(element);
+      });
+      return table;
     };
     const hydrate = index => {
       const state = states[index];
@@ -116,50 +188,15 @@ export function renderModel(model, viewport, content, auxiliary) {
               path.setAttribute('stroke-width', String(item.strokeWidth ?? 1));
               svg.append(path); element.append(svg); element.style.overflow = 'visible';
             }
-          } else {
-            element = node('div', 'op-slide-text'); element.style.fontSize = `${item.fontSize || 24}px`;
-            runStyle(element, item);
-            element.style.overflow = item.verticalOverflow === 'clip' ? 'hidden' : 'visible';
-            if (item.align) element.style.textAlign = item.align;
-            element.style.justifyContent = ({ middle: 'center', center: 'center', bottom: 'flex-end' }[item.verticalAlign]) || 'flex-start';
-            const body = node('div', 'op-slide-text-content');
-            if (item.paragraphs?.length) {
-              for (const paragraph of item.paragraphs) {
-                const p = node('p', 'op-slide-paragraph'); appendRuns(p, paragraph.runs);
-                const sizes = (paragraph.runs || []).map(run => run.fontSize).filter(value => value > 0);
-                const fontSize = sizes.length ? Math.max(...sizes) : item.fontSize || 24;
-                p.style.fontSize = `${fontSize}px`;
-                const family = paragraph.runs?.find(run => run.fontFamily)?.fontFamily;
-                if (family) p.style.fontFamily = fontStack(family);
-                if (paragraph.align) p.style.textAlign = paragraph.align;
-                const normalLine = fontSize * 1.2;
-                const lineHeight = paragraph.lineHeightPx > 0 ? paragraph.lineHeightPx : normalLine * (paragraph.lineHeight > 0 ? paragraph.lineHeight : 1);
-                p.style.lineHeight = `${lineHeight}px`;
-                if (paragraph.lineHeight > 0 && !paragraph.lineHeightPx) {
-                  // Percentage spacing multiplies the normal line advance. Keep
-                  // the extra initial leading rather than letting CSS halve it.
-                  const leading = (paragraph.lineHeight - 1) * fontSize - (lineHeight - normalLine) / 2;
-                  p.style.position = 'relative'; p.style.top = `${leading}px`;
-                }
-                const before = paragraph.spaceBefore ?? (paragraph.spaceBeforeRatio || 0) * lineHeight;
-                const after = paragraph.spaceAfter ?? (paragraph.spaceAfterRatio || 0) * lineHeight;
-                if (before) p.style.marginTop = `${before}px`;
-                if (after) p.style.marginBottom = `${after}px`;
-                body.append(p);
-              }
-            } else {
-              const sizes = (item.runs || []).map(run => run.fontSize).filter(value => value > 0);
-              if (sizes.length) body.style.fontSize = `${Math.max(...sizes)}px`;
-              appendRuns(body, item.runs);
-            }
-            element.append(body);
-          }
+          } else if (item.type === 'table') element = slideTable(item);
+          else element = slideText(item);
           Object.assign(element.style, { left: `${item.x || 0}px`, top: `${item.y || 0}px`, width: `${item.width || 0}px`, height: `${item.height || 0}px` });
           const transform = [];
           if (item.rotation) transform.push(`rotate(${item.rotation}deg)`);
           if (item.flipH) transform.push('scaleX(-1)');
           if (item.flipV) transform.push('scaleY(-1)');
           if (transform.length) element.style.transform = transform.join(' ');
+          if (item.transformOrigin) element.style.transformOrigin = `${item.transformOrigin.x}px ${item.transformOrigin.y}px`;
           canvas.append(element);
         }
         state.hydrated = true; state.slot.dataset.ready = 'true';

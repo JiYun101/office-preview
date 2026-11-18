@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { parseOoxml } from '../src/parsers/ooxml.js';
 import { readZip } from '../src/containers/zip.js';
 import { makeZip } from '../scripts/generate-fixtures.mjs';
-import { buildStyledDocx } from '../scripts/word-fixtures.mjs';
+import { buildStyledDocx, buildWordPageAreasDocx } from '../scripts/word-fixtures.mjs';
 
 const encoder = new TextEncoder(), decoder = new TextDecoder();
 const text = paragraph => paragraph.runs.map(run => run.text || '').join('');
@@ -106,6 +106,35 @@ test('DOCX inline images retain native dimensions and tables remain structural',
   const table = model.blocks.find(block => block.type === 'table');
   assert.equal(table.rows.length, 2); assert.equal(table.rows[0].length, 2);
   assert.deepEqual(table.columnWidths, [300, 300]);
+});
+
+test('DOCX reads page areas per section, their own media relationships and cached fields', async () => {
+  const model = await parseOoxml(buildWordPageAreasDocx(), 'docx');
+  const [first, last] = model.sections;
+  assert.equal(model.evenAndOddHeaders, true);
+  assert.equal(first.titlePage, true);
+  assert.equal(last.titlePage, false);
+  assert.deepEqual([first.pageNumberStart, last.pageNumberStart], [4, 8]);
+  assert.deepEqual([first.headerDistance, first.footerDistance], [32, 24]);
+  assert.equal(text(first.headers.first[0]), 'First header');
+  assert.equal(text(last.headers.default[0]), 'Next odd header');
+  assert.equal(last.headers.even, first.headers.even);
+  const image = first.headers.even[0].runs.find(run => run.image).image;
+  assert.deepEqual([image.width, image.height, image.mime], [32, 24, 'image/png']);
+  assert.equal(last.footers.default, first.footers.default);
+  assert.equal(text(last.footers.default[0].rows[0][0].blocks[0]), 'Cached page');
+  assert.deepEqual(model.blocks.map(block => block.sectionIndex), [0, 0, 0, 1, 1]);
+  assert.match(model.warnings.join('\n'), /页眉页脚中的域使用文件保存的结果/);
+});
+
+test('a damaged DOCX page area leaves the body and other areas readable', async () => {
+  const parts = await readZip(buildWordPageAreasDocx());
+  parts.set('word/even.xml', encoder.encode('<broken>'));
+  const model = await parseOoxml(makeZip(Object.fromEntries(parts)), 'docx');
+  assert.equal(text(model.blocks[0]), 'First body');
+  assert.equal(text(model.sections[0].headers.first[0]), 'First header');
+  assert.deepEqual(model.sections[1].headers.even, []);
+  assert.match(model.warnings.join('\n'), /页眉页脚部件无效或缺失/);
 });
 
 test('DOCX print TOC suppresses implicit hyperlink color but preserves direct formatting and ordinary links', async () => {

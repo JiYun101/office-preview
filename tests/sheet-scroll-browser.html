@@ -38,15 +38,18 @@ await check('CSV 引号字段中的单独CR也增加行高，不裁掉下一行�
   assert(text.getBoundingClientRect().height<=box.getBoundingClientRect().height+0.5,'下一行文字超出单元格可见内容区域');
 }));
 
-await check('合并区域横跨虚拟窗口仍从原锚点读取，并保持完整合并区域的对齐',async()=>{
+async function withRenderedSheet(model,action){
   const host=document.createElement('div');host.className='viewer';area.append(host);
   const root=host.attachShadow({mode:'open'}),style=document.createElement('style');style.textContent=viewerStyles;
   const shell=document.createElement('div'),viewport=document.createElement('div'),content=document.createElement('div'),auxiliary=document.createElement('div');
   shell.className='op-shell';viewport.className='op-viewport';content.className='op-content';viewport.append(content);shell.append(auxiliary,viewport);root.append(style,shell);
+  const rendered=renderModel(model,viewport,content,auxiliary);
+  try{await rendered.ready;await action(root,viewport);}finally{rendered.dispose();host.remove();}
+}
+
+await check('合并区域横跨虚拟窗口仍从原锚点读取，并保持完整合并区域的对齐',async()=>{
   const rows=[];rows[0]=[{value:'Merged anchor',style:{align:'center',verticalAlign:'middle'}}];rows[999]=Array.from({length:100},(_,col)=>({value:`LAST ${col}`}));
-  const rendered=renderModel({kind:'spreadsheet',format:'xlsx',sheets:[{name:'Merged',rows,merges:[{startRow:0,startCol:0,endRow:499,endCol:99}]}]},viewport,content,auxiliary);
-  try{
-    await rendered.ready;
+  await withRenderedSheet({kind:'spreadsheet',format:'xlsx',sheets:[{name:'Merged',rows,merges:[{startRow:0,startCol:0,endRow:499,endCol:99}]}]},async(root,viewport)=>{
     viewport.scrollTop=500*31/2-viewport.clientHeight/2+31;viewport.scrollLeft=100*105/2-viewport.clientWidth/2+45;
     await wait(()=>Number(root.querySelector('.op-grid')?.dataset.startRow)>0&&Number(root.querySelector('.op-grid')?.dataset.startCol)>0);
     const cell=root.querySelector('td[title^="A1:"]');assert(cell&&cell.textContent==='Merged anchor','原始锚点位于窗口外时，合并值丢失');
@@ -56,7 +59,30 @@ await check('合并区域横跨虚拟窗口仍从原锚点读取，并保持完�
     viewport.scrollTop=viewport.scrollHeight;viewport.scrollLeft=viewport.scrollWidth;
     await wait(()=>root.querySelector('td[title^="CV1000:"]')?.textContent==='LAST 99');
     assert(root.querySelectorAll('.op-grid td').length<4000,'合并区域导致全表DOM展开');
-  }finally{rendered.dispose();host.remove();}
+  });
+});
+
+await check('XLSM 显示数字和日期格式，隐藏行列不占尺寸且合并锚点保持原坐标',async()=>{
+  const rows=[
+    [{value:'合并区域'}, {value:'隐藏列'}],
+    [{value:'隐藏行'}],
+    [,,, {value:0.125, formula:'1/8', style:{format:'0.00%',align:'center',wrapText:true,borders:{bottom:{width:2,color:'#113355'}}}}],
+    [,,, {value:0,style:{format:'yyyy-mm-dd'}}],
+  ];
+  const sheet={name:'样式',rows,date1904:true,defaultRowHeight:24,rowHeights:[,,40],hiddenRows:[,true],hiddenColumns:[,true],merges:[{startRow:0,startCol:0,endRow:2,endCol:2}]};
+  await withRenderedSheet({kind:'spreadsheet',format:'xlsm',sheets:[sheet]},async root=>{
+    const grid=root.querySelector('.op-grid');
+    assert(Array.from(grid.querySelectorAll('thead th'),cell=>cell.textContent).join(',')===',A,C,D','列标题没有跳过隐藏列或坐标偏移');
+    assert(Array.from(grid.querySelectorAll('tbody th'),cell=>cell.textContent).join(',')==='1,3,4','行标题没有跳过隐藏行或坐标偏移');
+    assert(!grid.textContent.includes('隐藏行')&&!grid.textContent.includes('隐藏列'),'隐藏内容出现在预览中');
+    const merge=grid.querySelector('[data-address="A1"]');
+    assert(merge.textContent==='合并区域'&&merge.rowSpan===2&&merge.colSpan===2,'跨隐藏行列的合并范围未按可见网格显示');
+    const percent=grid.querySelector('[data-address="D3"]');
+    assert(percent.textContent==='12.50%'&&percent.title.includes('=1/8')&&percent.title.endsWith('0.125'),'公式缓存格式化错误');
+    assert(grid.querySelector('[data-address="D4"]').textContent==='1904-01-01','1904 日期系统未用于显示');
+    assert(percent.parentElement.getBoundingClientRect().height===40,'显式行高没有生效');
+    assert(percent.style.textAlign==='center'&&percent.style.borderBottomWidth==='2px'&&percent.querySelector('.op-cell-text').style.whiteSpace==='pre-wrap','预览丢失对齐、边框或自动换行');
+  });
 });
 
 window.officeBrowserTestResults={total:results.length,passed:results.every(result=>result.ok),results};document.documentElement.dataset.status=results.every(result=>result.ok)?'pass':'fail';document.title=`${results.every(result=>result.ok)?'PASS':'FAIL'} ${results.filter(result=>result.ok).length}/${results.length}`;output.textContent=JSON.stringify(window.officeBrowserTestResults,null,2);

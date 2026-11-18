@@ -19,6 +19,20 @@ function indexAt(offsets, position) {
   return Math.min(low, offsets.length - 2);
 }
 
+function layoutAxis(count, hidden, sizeAt) {
+  const indices = [], offsets = [0], positions = new Uint32Array(count + 1);
+  for (let index = 0; index < count; index++) {
+    positions[index] = indices.length;
+    if (hidden?.[index]) continue;
+    const size = sizeAt(index);
+    if (size === 0) continue;
+    indices.push(index);
+    offsets.push(offsets.at(-1) + size);
+  }
+  positions[count] = indices.length;
+  return { indices, offsets, positions };
+}
+
 // Only the visible rows/columns exist as cells. The spacer retains the complete
 // worksheet geometry, so scrolling never changes the file's row/column sizes.
 export function renderSheet(model, viewport, content, auxiliary, options = {}) {
@@ -55,25 +69,23 @@ export function renderSheet(model, viewport, content, auxiliary, options = {}) {
       measure.font = `${sheet.defaultFont.fontSize || 14}px ${fontStack(sheet.defaultFont.fontFamily || 'Arial')}`;
       digit = Math.max(...Array.from('0123456789', character => measure.measureText(character).width));
     }
-    const columns = new Float64Array(colCount + 1);
-    for (let col = 0; col < colCount; col++) {
+    const columnAxis = layoutAxis(colCount, sheet.hiddenColumns, col => {
       const units = sheet.columnWidthUnits?.[col] ?? sheet.defaultColumnWidthUnits;
       const size = units !== undefined && sheet.defaultFont ? units / 256 * digit + 5 : sheet.columnWidths?.[col] ?? sheet.defaultColumnWidth ?? 105;
-      columns[col + 1] = columns[col] + Math.max(1, Math.min(2000, size));
-    }
-    const rows = new Float64Array(rowCount + 1);
-    for (let row = 0; row < rowCount; row++) {
+      return Math.max(1, Math.min(2000, size));
+    });
+    const rowAxis = layoutAxis(rowCount, sheet.hiddenRows, row => {
       let height = sheet.rowHeights?.[row] ?? sheet.defaultRowHeight ?? (formatted ? 20 : 31);
       // CSV/XLSX values can contain deliberate line breaks. Preserve those
       // without allowing content-driven table growth to corrupt scroll offsets.
-      if (!formatted && sheet.rowHeights?.[row] === undefined) {
+      if (!formatted && sheet.rowHeights?.[row] === undefined && sheet.defaultRowHeight === undefined) {
         for (const cell of sheet.rows[row] || []) {
           if (cell?.value !== undefined) height = Math.max(height, String(cell.value).split(/\r\n|\r|\n/).length * 19.5 + 10);
         }
       }
-      rows[row + 1] = rows[row] + Math.max(0, height);
-    }
-    const result = { sheet, rowCount, colCount, rows, columns };
+      return Math.max(0, height);
+    });
+    const result = { sheet, rowAxis, columnAxis };
     layouts.set(index, result); return result;
   }
   const styleFor = (sheet, row, col) => sheet.rows[row]?.[col]?.style || sheet.rowStyles?.[row] || sheet.columnStyles?.[col] || sheet.defaultStyle || {};
@@ -82,7 +94,10 @@ export function renderSheet(model, viewport, content, auxiliary, options = {}) {
   }
   function draw() {
     if (disposed) return;
-    const { sheet, rowCount, colCount, rows, columns } = layoutFor(selected);
+    const { sheet, rowAxis, columnAxis } = layoutFor(selected);
+    const { indices: rowIndices, offsets: rows, positions: rowPositions } = rowAxis;
+    const { indices: colIndices, offsets: columns, positions: colPositions } = columnAxis;
+    const rowCount = rowIndices.length, colCount = colIndices.length;
     tabButtons.forEach((tab, index) => tab.setAttribute('aria-selected', String(index === selected)));
     spacer.style.width = `${ROW_HEADER + columns[colCount]}px`;
     spacer.style.height = `${COLUMN_HEADER + rows[rowCount]}px`;
@@ -97,55 +112,61 @@ export function renderSheet(model, viewport, content, auxiliary, options = {}) {
     if (key === windowKey) return;
     windowKey = key;
     const table = node('table', 'op-grid op-sheet-formatted op-sheet-window'); table.setAttribute('aria-label', `${sheet.name} 工作表`);
-    table.dataset.startRow = String(startRow); table.dataset.endRow = String(endRow); table.dataset.startCol = String(startCol); table.dataset.endCol = String(endCol);
+    table.dataset.startRow = String(rowIndices[startRow] ?? 0); table.dataset.endRow = String(rowCount ? rowIndices[endRow - 1] + 1 : 0);
+    table.dataset.startCol = String(colIndices[startCol] ?? 0); table.dataset.endCol = String(colCount ? colIndices[endCol - 1] + 1 : 0);
     Object.assign(table.style, { position: 'absolute', top: `${rows[startRow]}px`, left: `${columns[startCol]}px`, width: `${ROW_HEADER + columns[endCol] - columns[startCol]}px`, tableLayout: 'fixed', borderCollapse: formatted ? 'collapse' : 'separate', borderSpacing: '0' });
     const group = node('colgroup'), rowNumberCol = node('col'); rowNumberCol.style.width = `${ROW_HEADER}px`; group.append(rowNumberCol);
     for (let col = startCol; col < endCol; col++) { const element = node('col'); element.style.width = `${columns[col + 1] - columns[col]}px`; group.append(element); }
     table.append(group);
     const thead = node('thead'), head = node('tr'); head.style.height = `${COLUMN_HEADER}px`;
     const corner = node('th'); corner.style.width = `${ROW_HEADER}px`; head.append(corner);
-    for (let col = startCol; col < endCol; col++) { const th = node('th', '', columnName(col)); th.scope = 'col'; th.style.whiteSpace = 'nowrap'; th.style.overflow = 'hidden'; head.append(th); }
+    for (let col = startCol; col < endCol; col++) { const th = node('th', '', columnName(colIndices[col])); th.scope = 'col'; th.style.whiteSpace = 'nowrap'; th.style.overflow = 'hidden'; head.append(th); }
     thead.append(head); table.append(thead);
     const merged = new Map();
     for (const range of sheet.merges || []) {
-      const top = Math.max(startRow, range.startRow), bottom = Math.min(endRow - 1, range.endRow);
-      const left = Math.max(startCol, range.startCol), right = Math.min(endCol - 1, range.endCol);
+      // Convert the physical range to visible coordinates before clipping to the window.
+      const firstRow = rowPositions[range.startRow], afterRow = rowPositions[range.endRow + 1];
+      const firstCol = colPositions[range.startCol], afterCol = colPositions[range.endCol + 1];
+      const top = Math.max(startRow, firstRow), bottom = Math.min(endRow - 1, afterRow - 1);
+      const left = Math.max(startCol, firstCol), right = Math.min(endCol - 1, afterCol - 1);
+      const merge = { ...range, top, bottom, left, right, firstRow, afterRow, firstCol, afterCol };
       for (let row = top; row <= bottom; row++) for (let col = left; col <= right; col++) {
         if (merged.has(`${row}:${col}`)) throw new Error('工作表包含重叠的合并区域，无法正确预览。');
-        merged.set(`${row}:${col}`, { ...range, top, bottom, left, right });
+        merged.set(`${row}:${col}`, merge);
       }
     }
     const tbody = node('tbody');
     for (let row = startRow; row < endRow; row++) {
-      const tr = node('tr'); tr.style.height = `${rows[row + 1] - rows[row]}px`; tr.dataset.row = String(row);
-      if (rows[row + 1] === rows[row]) tr.style.display = 'none';
-      const th = node('th'), number = node('span', '', row + 1); th.scope = 'row'; th.style.top = 'auto'; th.style.position = 'sticky';
+      const tr = node('tr'); tr.style.height = `${rows[row + 1] - rows[row]}px`; tr.dataset.row = String(rowIndices[row]);
+      const th = node('th'), number = node('span', '', rowIndices[row] + 1); th.scope = 'row'; th.style.top = 'auto'; th.style.position = 'sticky';
       Object.assign(number.style, { position: 'absolute', inset: '0', display: 'flex', alignItems: 'center', justifyContent: 'center', lineHeight: 'normal' }); th.append(number); tr.append(th);
       for (let col = startCol; col < endCol; col++) {
         const merge = merged.get(`${row}:${col}`);
         if (merge && (row !== merge.top || col !== merge.left)) continue;
-        const sourceRow = merge?.startRow ?? row, sourceCol = merge?.startCol ?? col;
+        const sourceRow = merge?.startRow ?? rowIndices[row], sourceCol = merge?.startCol ?? colIndices[col];
         const cell = sheet.rows[sourceRow]?.[sourceCol], value = cell?.value ?? '', style = cell?.style || styleFor(sheet, sourceRow, sourceCol);
-        const display = formatted ? formatSpreadsheetValue(value, style.format, { date1904: sheet.date1904 }) : value;
+        const display = formatted || (typeof value === 'number' && style.format) ? formatSpreadsheetValue(value, style.format, { date1904: sheet.date1904 }) : value;
         const td = node('td'); td.dataset.row = String(sourceRow); td.dataset.col = String(sourceCol);
         if (merge) { td.rowSpan = merge.bottom - merge.top + 1; td.colSpan = merge.right - merge.left + 1; }
         runStyle(td, style); td.style.textAlign = style.align || (typeof value === 'number' ? 'right' : 'left');
         if (style.verticalAlign) td.style.verticalAlign = style.verticalAlign;
         for (const side of ['top', 'right', 'bottom', 'left']) border(td, side, style.borders?.[side]);
         if (formatted) {
-          if (!style.borders?.bottom?.width) border(td, 'bottom', styleFor(sheet, (merge?.endRow ?? row) + 1, sourceCol).borders?.top);
-          if (!style.borders?.right?.width) border(td, 'right', styleFor(sheet, sourceRow, (merge?.endCol ?? col) + 1).borders?.left);
+          const nextRow = rowIndices[merge?.afterRow ?? row + 1] ?? rowPositions.length - 1;
+          const nextCol = colIndices[merge?.afterCol ?? col + 1] ?? colPositions.length - 1;
+          if (!style.borders?.bottom?.width) border(td, 'bottom', styleFor(sheet, nextRow, sourceCol).borders?.top);
+          if (!style.borders?.right?.width) border(td, 'right', styleFor(sheet, sourceRow, nextCol).borders?.left);
         }
         const box = node('div', 'op-cell-content'), text = node('span', 'op-cell-text', display);
         box.style.alignItems = ({ top: 'flex-start', middle: 'center', bottom: 'flex-end' }[style.verticalAlign]) || 'flex-end';
         box.style.justifyContent = ({ center: 'center', right: 'flex-end' }[td.style.textAlign]) || 'flex-start';
         text.style.whiteSpace = style.wrapText ? 'pre-wrap' : 'pre';
-        if (!formatted) text.style.lineHeight = '1.5';
+        if (!formatted && sheet.rowHeights?.[sourceRow] === undefined && sheet.defaultRowHeight === undefined) text.style.lineHeight = '1.5';
         if (style.wrapText) text.style.width = '100%';
         if (style.rotation && style.rotation !== 255) text.style.transform = `rotate(${-style.rotation}deg)`;
         if (style.rotation === 255) text.style.writingMode = 'vertical-rl';
         if (style.indent) box.style.paddingLeft = `${style.indent * (style.fontSize || 14) * 0.75}px`;
-        if (merge) Object.assign(box.style, { left: `${columns[merge.startCol] - columns[merge.left] + 4}px`, top: `${rows[merge.startRow] - rows[merge.top] + 2}px`, right: 'auto', bottom: 'auto', width: `${Math.max(0, columns[merge.endCol + 1] - columns[merge.startCol] - 8)}px`, height: `${Math.max(0, rows[merge.endRow + 1] - rows[merge.startRow] - 4)}px` });
+        if (merge) Object.assign(box.style, { left: `${columns[merge.firstCol] - columns[merge.left] + 4}px`, top: `${rows[merge.firstRow] - rows[merge.top] + 2}px`, right: 'auto', bottom: 'auto', width: `${Math.max(0, columns[merge.afterCol] - columns[merge.firstCol] - 8)}px`, height: `${Math.max(0, rows[merge.afterRow] - rows[merge.firstRow] - 4)}px` });
         box.append(text); td.append(box);
         const address = `${columnName(sourceCol)}${sourceRow + 1}`;
         td.title = cell?.formula ? `${address}: =${cell.formula}\n${value}` : `${address}: ${value}`;

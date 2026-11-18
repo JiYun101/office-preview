@@ -2,7 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { deflateSync } from 'node:zlib';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { makeZip, crc32 } from './generate-fixtures.mjs';
+import { makeCompound, makeZip, crc32 } from './generate-fixtures.mjs';
 
 // Original, synthetic format fixtures. No user document content is copied here.
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
@@ -62,9 +62,89 @@ export function buildStyledDocx() {
   });
 }
 
+export function buildWordPageAreasDocx() {
+  const p = text => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const rel = (id, type, target) => `<Relationship Id="${id}" Type="${R}/${type}" Target="${target}"/>`;
+  const rels = content => xml(`<Relationships xmlns="${REL}">${content}</Relationships>`);
+  const header = (id, type) => `<w:headerReference w:type="${type}" r:id="${id}"/>`;
+  const footer = '<w:footerReference w:type="default" r:id="footer"/>';
+  const geometry = '<w:pgSz w:w="9600" w:h="7200"/><w:pgMar w:top="720" w:right="600" w:bottom="720" w:left="900" w:header="480" w:footer="360"/>';
+  const firstSection = `<w:sectPr>${header('first', 'first')}${header('odd', 'default')}${header('even', 'even')}${footer}${geometry}<w:pgNumType w:start="4"/><w:titlePg/></w:sectPr>`;
+  const lastSection = `<w:sectPr>${header('last', 'default')}${geometry}<w:pgNumType w:start="8"/></w:sectPr>`;
+  const before = (label, section = '') => `<w:p><w:pPr><w:pageBreakBefore/>${section}</w:pPr><w:r><w:t>${label}</w:t></w:r></w:p>`;
+  const wordPart = (root, content) => xml(`<w:${root} xmlns:w="${W}" xmlns:r="${R}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">${content}</w:${root}>`);
+  const drawing = '<w:r><w:drawing><wp:inline><wp:extent cx="304800" cy="228600"/><a:graphic><a:graphicData><a:blip r:embed="logo"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  const cachedField = '<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>Cached page</w:t></w:r></w:fldSimple></w:p>';
+  const table = `<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc>${cachedField}</w:tc></w:tr></w:tbl>`;
+  const headerIds = ['first', 'odd', 'even', 'last'];
+  const override = (part, kind) => `<Override PartName="/word/${part}.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml"/>`;
+  return makeZip({
+    '[Content_Types].xml': xml(`<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="png" ContentType="image/png"/>${override('document', 'document.main')}${override('settings', 'settings')}${headerIds.map(id => override(id, 'header')).join('')}${override('footer', 'footer')}</Types>`),
+    '_rels/.rels': rels(rel('office', 'officeDocument', 'word/document.xml')),
+    'word/document.xml': wordPart('document', `<w:body>${p('First body')}${before('Second body')}${before('Third body', firstSection)}${p('Next section')}${before('Last body')}${lastSection}</w:body>`),
+    'word/_rels/document.xml.rels': rels(rel('settings', 'settings', 'settings.xml') + headerIds.map(id => rel(id, 'header', `${id}.xml`)).join('') + rel('footer', 'footer', 'footer.xml')),
+    'word/settings.xml': wordPart('settings', '<w:evenAndOddHeaders/>'),
+    'word/first.xml': wordPart('hdr', p('First header')),
+    'word/odd.xml': wordPart('hdr', p('Odd header')),
+    'word/even.xml': wordPart('hdr', `<w:p><w:r><w:t>Even header</w:t></w:r>${drawing}</w:p>`),
+    'word/_rels/even.xml.rels': rels(rel('logo', 'image', 'media/logo.png')),
+    'word/last.xml': wordPart('hdr', p('Next odd header')),
+    'word/footer.xml': wordPart('ftr', table),
+    'word/media/logo.png': png(),
+  });
+}
+
+export function buildWordPageAreasDoc({ invalidIndex = false } = {}) {
+  const firstSection = 'First body\r\fSecond body\r\fThird body\r';
+  const main = firstSection + 'Next section\r\fLast body\r';
+  const footnotes = 'Footnote outside the page areas\r';
+  const stories = [
+    'Hidden separator\r', '', '', '', '', '',
+    'Even header\r\r', 'Odd header\r\r', 'Even footer\r\r', '\x13PAGE\x145\x15\r\r', 'First header\r\r', 'First footer\r\r',
+    '', 'Next odd header\r\r', '', '', '', '',
+  ];
+  const headerText = stories.join('') + '\r';
+  const text = main + footnotes + headerText, split = main.length + footnotes.length + 20;
+  const word = Buffer.alloc(4096), firstOffset = 2048, secondOffset = 2600;
+  word.writeUInt16LE(0xa5ec); word.writeUInt16LE(0x00c1, 2); word.writeUInt16LE(0x0204, 10);
+  word.writeUInt32LE(firstOffset, 24); word.writeUInt32LE(secondOffset + (text.length - split) * 2, 28);
+  word.writeUInt16LE(14, 32); word.writeUInt16LE(22, 62); word.writeUInt32LE(word.length, 64);
+  word.writeUInt32LE(main.length, 76); word.writeUInt32LE(footnotes.length, 80); word.writeUInt32LE(headerText.length, 84); word.writeUInt16LE(93, 152);
+  word.write(text.slice(0, split), firstOffset, 'utf16le'); word.write(text.slice(split), secondOffset, 'utf16le');
+
+  const sections = Buffer.alloc(36);
+  sections.writeUInt32LE(firstSection.length, 4); sections.writeUInt32LE(main.length, 8);
+  for (const [index, pageNumber] of [4, 8].entries()) {
+    const offset = 3072 + index * 64;
+    const properties = Buffer.from([
+      0x0a, 0x30, index === 0 ? 1 : 0, 0x11, 0x30, 1, 0x1c, 0x50, pageNumber, 0,
+      0x17, 0xb0, 0xe0, 0x01, 0x18, 0xb0, 0x68, 0x01,
+    ]);
+    word.writeUInt16LE(properties.length, offset); properties.copy(word, offset + 2);
+    sections.writeUInt32LE(offset, 14 + index * 12);
+    sections.writeUInt32LE(0xffffffff, 20 + index * 12);
+  }
+  const headerIndex = Buffer.alloc((stories.length + 2) * 4);
+  let cp = 0;
+  for (const [index, story] of stories.entries()) { headerIndex.writeUInt32LE(cp, index * 4); cp += story.length; }
+  headerIndex.writeUInt32LE(cp + Number(invalidIndex), stories.length * 4);
+  headerIndex.writeUInt32LE(cp + 3, (stories.length + 1) * 4);
+  const dop = Buffer.alloc(500); dop[0] = 1;
+  const clx = Buffer.alloc(33); clx[0] = 2; clx.writeUInt32LE(28, 1);
+  clx.writeUInt32LE(split, 9); clx.writeUInt32LE(text.length, 13);
+  clx.writeUInt32LE(firstOffset, 19); clx.writeUInt32LE(secondOffset, 27);
+  const parts = [[6, sections], [11, headerIndex], [31, dop], [33, clx]];
+  let offset = 0;
+  for (const [index, part] of parts) {
+    word.writeUInt32LE(offset, 154 + index * 8); word.writeUInt32LE(part.length, 158 + index * 8);
+    offset += part.length;
+  }
+  return makeCompound({ WordDocument: word, '1Table': Buffer.concat(parts.map(([, part]) => part)) });
+}
+
 export async function generateWordFixtures(destination = new URL('../fixtures/', import.meta.url)) {
   await mkdir(destination, { recursive: true });
-  const files = { 'styled.docx': buildStyledDocx() };
+  const files = { 'styled.docx': buildStyledDocx(), 'page-areas.docx': buildWordPageAreasDocx(), 'page-areas.doc': buildWordPageAreasDoc() };
   for (const [name, bytes] of Object.entries(files)) await writeFile(new URL(name, destination), bytes);
   return Object.entries(files).map(([name, bytes]) => ({ name, bytes: bytes.length }));
 }

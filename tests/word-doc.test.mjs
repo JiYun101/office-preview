@@ -91,3 +91,85 @@ test('DOC malformed FKP ranges and PICF lengths fail rather than borrowing neigh
 test('DOC cached TOC links inherit paragraph appearance while body links keep hyperlink style',()=>{const model=parseLegacy(styledDoc({hyperlink:true}),'doc'),toc=model.blocks[1],body=model.blocks[2];assert.ok(toc.runs.every(run=>run.color==='#000000'&&!run.underline));assert.ok(toc.runs.every(run=>run.fontSize===22*2/3));assert.ok(body.runs.some(run=>run.color==='#0563c1'&&run.underline));});
 test('DOC direct character color still wins inside a cached TOC field',()=>{const toc=parseLegacy(styledDoc({hyperlink:true,directColor:true}),'doc').blocks[1];assert.ok(toc.runs.every(run=>run.color==='#008000'));});
 test('DOC paragraph mark keeps its own character metrics without changing visible runs',()=>{const toc=parseLegacy(styledDoc({markFont:true}),'doc').blocks[1];assert.equal(toc.paragraphMarkStyle.fontFamily,'Arial');assert.equal(toc.paragraphMarkStyle.fontSize,20);assert.ok(toc.runs.every(run=>run.fontSize!==20));});
+
+function tableDoc({ indirect = false, damaged = false } = {}) {
+  const withinTable = prl(0x2416, Buffer.from([1]));
+  const data = [];
+  let dataSize = 0;
+  const rowEnd = (edges, flags, height) => {
+    const cells = flags.map(flag => Buffer.concat([u16(flag), Buffer.alloc(18)]));
+    const definition = Buffer.concat([Buffer.from([flags.length]), ...edges.map(u16), ...cells]);
+    const columnProperties = [prl(0x7621, Buffer.concat([Buffer.from([0, flags.length]), u16(180)]))];
+    for (let column = 0; column < flags.length; column++) {
+      columnProperties.push(prl(0x7623, Buffer.concat([Buffer.from([column, column + 1]), u16(edges[column + 1] - edges[column])])));
+      if (flags[column]) columnProperties.push(prl(0xd62b, Buffer.from([2, column, flags[column] >> 5])));
+    }
+    const properties = Buffer.concat([
+      withinTable, prl(0x2417, Buffer.from([1])),
+      ...(indirect ? columnProperties : [prl(0xd608, Buffer.concat([u16(definition.length + 1), definition]))]),
+      prl(0x9407, u16(height)), prl(0x548a, u16(1)),
+      prl(0xd605, Buffer.from([24, ...Array.from({ length: 6 }, () => [4, 1, 0, 0]).flat()])),
+    ]);
+    const reference = prl(indirect ? 0x646b : 0x6646, u32(dataSize));
+    data.push(u16(properties.length), properties);
+    dataSize += properties.length + 2;
+    return reference;
+  };
+  const edges = [0, 1500, 3900, 4500];
+  const records = [
+    ['Before\r'], ['Horizontal\x07', withinTable], ['Right\x07', withinTable],
+    ['\x07', rowEnd(damaged ? [0, 5000, 4500] : [0, 3900, 4500], [0, 0], -900)],
+    ['Vertical\x07', withinTable], ['First paragraph\r', withinTable], ['Second paragraph\x07', withinTable],
+    ['\x07', withinTable], ['\x07', rowEnd(edges, [0x60, 0, 0], 450)],
+    ['\x07', withinTable], ['Tail\x07', withinTable], ['\x07', withinTable], ['\x07', rowEnd(edges, [0x20, 0, 0], 0)],
+    ['After\r'],
+  ];
+  const text = records.map(([source]) => source).join(''), start = 2048, end = start + text.length * 2;
+  const word = Buffer.alloc(8192);
+  word.writeUInt16LE(0xa5ec, 0); word.writeUInt16LE(0xc1, 2); word.writeUInt16LE(0x204, 10);
+  word.writeUInt16LE(14, 32); word.writeUInt16LE(22, 62); word.writeUInt32LE(word.length, 64);
+  word.writeUInt32LE(text.length, 76); word.writeUInt16LE(93, 152);
+  utf16(text).copy(word, start);
+  let fc = start;
+  const ranges = records.map(([source, properties]) => {
+    const range = { start: fc, end: fc + source.length * 2, ...(properties ? { properties: Buffer.concat([u16(0), properties]) } : {}) };
+    fc = range.end;
+    return range;
+  });
+  fkp(word, 9, ranges, true);
+  const papx = Buffer.concat([u32(start), u32(end), u32(9)]);
+  word.writeUInt32LE(papx.length, 158 + 13 * 8);
+  const pcd = Buffer.concat([u32(0), u32(text.length), u16(0), u32(start), u16(0)]);
+  const clx = Buffer.concat([Buffer.from([2]), u32(pcd.length), pcd]);
+  word.writeUInt32LE(papx.length, 154 + 33 * 8); word.writeUInt32LE(clx.length, 158 + 33 * 8);
+  return makeCompound({ WordDocument: word, '1Table': Buffer.concat([papx, clx]), Data: Buffer.concat(data) });
+}
+
+test('DOC table keeps binary row heights, unequal columns, merges, and in-cell paragraphs', () => {
+  for (const indirect of [false, true]) {
+    const { blocks, warnings } = parseLegacy(tableDoc({ indirect }), 'doc');
+    const [before, table, after] = blocks;
+    assert.equal(before.runs[0].text, 'Before');
+    assert.equal(after.runs[0].text, 'After');
+    assert.equal(table.type, 'table');
+    assert.deepEqual(table.columnWidths, [100, 160, 40]);
+    assert.deepEqual(table.rowProperties, [{ height: 60, heightRule: 'exact' }, { height: 30, heightRule: 'atLeast' }, {}]);
+    assert.equal(table.align, 'center');
+    assert.equal(table.borders.insideH.width, 2 / 3);
+    assert.deepEqual(table.rows.map(row => row.length), [2, 3, 2]);
+    assert.equal(table.rows[0][0].colSpan, 2);
+    assert.equal(table.rows[1][0].rowSpan, 2);
+    assert.equal(table.rows[2][0].column, 1);
+    assert.deepEqual(table.rows[1][1].blocks.map(block => block.runs[0].text), ['First paragraph', 'Second paragraph']);
+    assert.ok(!warnings.some(message => message.includes('列边界')));
+  }
+});
+
+test('DOC keeps cell text and a basic table when the binary grid is damaged', () => {
+  const { blocks, warnings } = parseLegacy(tableDoc({ damaged: true }), 'doc');
+  const table = blocks.find(block => block.type === 'table');
+  assert.deepEqual(table.columnWidths, []);
+  assert.equal(table.rows[0][0].blocks[0].runs[0].text, 'Horizontal');
+  assert.equal(table.rows[2][1].blocks[0].runs[0].text, 'Tail');
+  assert.ok(warnings.some(message => message.includes('列边界')));
+});

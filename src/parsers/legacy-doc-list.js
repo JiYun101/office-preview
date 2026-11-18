@@ -28,7 +28,7 @@ function formatted(number, kind, warnings) {
 }
 
 export function createDocLists(tableBytes, pair, pairCount, warnings) {
-  const data = binary(tableBytes), definitions = new Map(), overrides = [], states = new Map();
+  const data = binary(tableBytes), definitions = new Map(), overrides = [];
   const part = pair(73), overridePart = pair(74);
   let levelBoundary = tableBytes.length;
   if (part.length) {
@@ -80,7 +80,7 @@ export function createDocLists(tableBytes, pair, pairCount, warnings) {
     }
   }
   return {
-    apply(paragraph, character) {
+    apply(paragraph, character, states) {
       const id = paragraph.paragraph._listId, levelIndex = paragraph.paragraph._listLevel || 0;
       if (!id) return null;
       const override = overrides[id - 1], definition = definitions.get(override?.id), change = override?.levels.get(levelIndex);

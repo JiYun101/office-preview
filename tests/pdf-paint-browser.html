@@ -55,6 +55,18 @@ await check('填充、描边和图片分别按透明度合成，后续图形恢�
   });
 });
 
+await check('静态高亮保留底下的深色笔画，下划线保留原色',async()=>{
+  await paint([
+    {type:'path',commands:rect(25,40,6,30),fill:'#000000'},
+    {type:'path',commands:rect(20,35,70,40),fill:'#ffff00',fillOpacity:.5,blend:'multiply'},
+    {type:'path',commands:[['M',20,31],['L',90,31]],stroke:'#0000ff',lineWidth:3},
+  ],({pixel})=>{
+    near(pixel(28,60),[0,0,0],'高亮保留黑色笔画');
+    near(pixel(50,60),[255,255,128],'半透明高亮覆盖白纸');
+    near(pixel(50,31),[0,0,255],'下划线颜色不受高亮混合影响');
+  });
+});
+
 await check('嵌入字形保留墨迹比例，文字填充、描边、双绘和不可见模式正确',async()=>{
   const program=preparePdfFontProgram(buildPdfFontFixture());
   const fonts=[{id:'paint-square',weight:400,style:'normal',program:{bytes:program.bytes,format:program.format}}];

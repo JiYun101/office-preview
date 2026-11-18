@@ -5,6 +5,7 @@ function element(tag, className, text) {
 }
 
 export function renderEmail(model, content) {
+  const attachmentUrls = [];
   const card = element('article', 'op-email');
   card.append(element('div', 'op-email-label', '邮件预览'), element('h1', 'op-email-subject', model.subject || '（无主题）'));
   const headers = element('dl', 'op-email-headers');
@@ -22,11 +23,21 @@ export function renderEmail(model, content) {
     for (const attachment of model.attachments) {
       const item = element('li', '');
       const size = attachment.size || 0;
-      item.append(element('strong', '', attachment.name || '未命名附件'), element('span', '', `${attachment.mime || 'application/octet-stream'} · ${size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`}`));
+      const name = attachment.name || '未命名附件';
+      item.append(element('strong', '', name), element('span', '', `${attachment.mime || 'application/octet-stream'} · ${size < 1024 ? `${size} B` : `${(size / 1024).toFixed(1)} KB`}`));
+      if (attachment.bytes instanceof Uint8Array) {
+        const link = element('a', '', '下载');
+        const url = URL.createObjectURL(new Blob([attachment.bytes], { type: 'application/octet-stream' }));
+        attachmentUrls.push(url);
+        link.href = url;
+        link.download = name;
+        link.setAttribute('aria-label', `下载 ${name}`);
+        item.append(link);
+      }
       list.append(item);
     }
     section.append(list); card.append(section);
   }
   content.append(card);
-  return { fitWidth: 850, dispose() {} };
+  return { fitWidth: 850, dispose() { for (const url of attachmentUrls.splice(0)) URL.revokeObjectURL(url); } };
 }

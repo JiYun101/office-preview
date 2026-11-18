@@ -72,13 +72,13 @@ try {
       await waitFor("location.pathname==='/tests/legacy-style-browser.html' && !!document.querySelector('#fixture-files')");
       const documentNode = await send('DOM.getDocument');
       const input = await send('DOM.querySelector', { nodeId: documentNode.root.nodeId, selector: '#fixture-files' });
-      await send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: ['styled.xls', 'styled.ppt'].map(name => join(root, 'fixtures', name)) });
+      await send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: ['styled.xls', 'hidden.xls', 'styled.ppt'].map(name => join(root, 'fixtures', name)) });
     }
     if (page === '/tests/word-browser.html') {
       await waitFor("location.pathname==='/tests/word-browser.html' && !!document.querySelector('#fixture-files')");
       const documentNode = await send('DOM.getDocument');
       const input = await send('DOM.querySelector', { nodeId: documentNode.root.nodeId, selector: '#fixture-files' });
-      await send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: [join(root, 'fixtures', 'styled.docx')] });
+      await send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: ['styled.docx', 'page-areas.docx', 'page-areas.doc'].map(name => join(root, 'fixtures', name)) });
     }
     if (page === '/tests/pdf-scroll-browser.html' || page === '/tests/pdf-quality-browser.html') {
       await waitFor(`location.pathname===${JSON.stringify(page)} && !!document.querySelector('#fixture-files')`);

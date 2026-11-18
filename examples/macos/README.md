@@ -24,7 +24,7 @@ Mac 需要安装包含 Swift 工具链的 Xcode 或 Command Line Tools。打包�
 
 窗口收到可信主框架发出的 `office-preview:ready` 后才启用“打开本地文件”。此信号表示 SDK API 已注册；网页导航完成不等于 SDK 就绪。
 
-`NSOpenPanel` 选择本地 DOC/DOCX、XLS/XLSX/CSV/TSV、PPT/PPTX、TXT、PDF、EML 或 MSG 文件。原生端先检查 32MiB 容量，再读取文件、编码为 base64，通过 `callAsyncJavaScript` 的命名参数调用 `window.officePreview.openBase64`，并等待返回的 Promise。文件名、内容不拼接到 JavaScript 源码。具体格式能力以 SDK 的兼容提示为准；此宿主不会补足内核尚未实现的排版、动画或邮件附件能力，也不支持 PST/OST 邮箱数据库。
+`NSOpenPanel` 可选择本地 DOC、XLS、PPT、CSV、TSV、TXT、PDF、EML、MSG，以及 SDK 支持的 OOXML 文档、宏文档、模板和放映文件。原生端先检查 32MiB 容量，再读取文件、编码为 base64，通过 `callAsyncJavaScript` 的命名参数调用 `window.officePreview.openBase64`，并等待返回的 Promise。具体预览能力以 SDK 的兼容提示为准。
 
 WebKit 通过 `window.webkit.messageHandlers.officePreview` 向宿主发送 ready、loaded、error。宿主核对 WKWebView、主框架、URL、端口和 security origin。导航只允许本实例的 `http://127.0.0.1:<随机端口>/embed.html` 主框架，其他页面与子框架导航均拒绝。PDF 由 SDK 自己解析并绘制，无需系统 PDF 查看器。子框架不能发送文件桥接消息。
 

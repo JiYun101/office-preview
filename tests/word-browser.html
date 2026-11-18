@@ -77,6 +77,43 @@ if(new URLSearchParams(location.search).has('inspect')){
     const numbered=model.blocks.find(block=>block.numberingLabel);assert(numbered&&numbered.numberingLabel.includes('1'),'自动编号模型缺失');
     const rendered=[...root.querySelectorAll('.op-word-paragraph')].find(node=>node.textContent.includes('编号列表项目'));assert(rendered&&rendered.textContent.includes('1'),'自动编号没有显示');
   }));
+  await check('页眉页脚按分节、首页和奇偶页显示，独立关系图片可解码',()=>withViewer(async(preview,root)=>{
+    await preview.open(await file('page-areas.docx'));preview.setZoom(1);
+    const papers=[...root.querySelectorAll('.op-word-page')];
+    const headers=papers.map(paper=>paper.querySelector('.op-word-page-header'));
+    const footers=papers.map(paper=>paper.querySelector('.op-word-page-footer'));
+    assert(headers.map(header=>header?.textContent.trim()).join(',')==='First header,Odd header,Even header,Even header,Next odd header','首页、奇偶页或跨节继承顺序错误');
+    assert(footers.map(footer=>footer?.querySelector('td')?.textContent.trim()).join(',')===',Cached page,,,Cached page','页脚表格、缓存域或空白变体不正确');
+    for(const [index,paper] of papers.entries()){
+      const bounds=paper.getBoundingClientRect(),body=paper.querySelector('.op-word-page-body').getBoundingClientRect();
+      const header=headers[index].getBoundingClientRect();
+      near(header.top-bounds.top,32,'页眉距纸张顶边不正确',0.5);near(header.left-bounds.left,60,'页眉未使用分节左边距',0.5);
+      assert(body.top>=header.bottom-0.5,'页眉高度未从正文空间扣除');
+      if(footers[index]){
+        const footer=footers[index].getBoundingClientRect();
+        near(bounds.bottom-footer.bottom,24,'页脚距纸张底边不正确',0.5);
+        assert(body.bottom<=footer.top+0.5,'正文侵入页脚区域');
+      }
+    }
+    const [first,second]=[headers[2],headers[3]].map(header=>header.querySelector('img'));
+    assert(first?.src.startsWith('blob:')&&first.src===second?.src,'跨页页眉没有复用同一图片资源');
+    first.loading='eager';await first.decode();assert(first.naturalWidth===8,'页眉图片字节未解码');
+    const url=first.src;preview.destroy();
+    assert(await fetch(url).then(()=>false,()=>true),'销毁实例后页眉图片 URL 未释放');
+  }));
+  await check('DOC 页眉页脚在真实 File 和 Worker 路径中按分节与页码变体显示',()=>withViewer(async(preview,root)=>{
+    await preview.open(await file('page-areas.doc'));preview.setZoom(1);
+    const pages=[...root.querySelectorAll('.op-word-page')];
+    const headers=pages.map(page=>page.querySelector('.op-word-page-header'));
+    const footers=pages.map(page=>page.querySelector('.op-word-page-footer'));
+    assert(headers.map(area=>area?.textContent.trim()).join(',')==='First header,Odd header,Even header,Even header,Next odd header','DOC 页眉变体或分节继承错误');
+    assert(footers.map(area=>area?.textContent.trim()).join(',')==='First footer,5,Even footer,Even footer,5','DOC 页脚变体或缓存域错误');
+    for(const [index,page] of pages.entries()) {
+      const paper=page.getBoundingClientRect(),header=headers[index].getBoundingClientRect(),footer=footers[index].getBoundingClientRect();
+      near(header.top-paper.top,32,'DOC 页眉距离错误',0.5);
+      near(paper.bottom-footer.bottom,24,'DOC 页脚距离错误',0.5);
+    }
+  }));
   await check('同一编号段落跨页后不重复列表前缀',()=>withWordModel([
     {type:'paragraph',numberingLabel:'1.',numberingSuffix:'space',runs:[{text:'Before break'},{type:'pageBreak',text:'\f'},{text:'Continued text'}]}
   ],async root=>{const pages=[...root.querySelectorAll('.op-paper')];assert(pages.length===2,'段内分页未形成两页');assert(pages[0].textContent.startsWith('1.'),'首页编号丢失');assert(pages[1].textContent==='Continued text','续页重复了编号或改变正文');}));

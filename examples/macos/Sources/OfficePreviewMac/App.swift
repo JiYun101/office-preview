@@ -130,7 +130,8 @@ final class PreviewApplication: NSObject, NSApplicationDelegate, WKNavigationDel
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = ["doc", "docx", "xls", "xlsx", "csv", "tsv", "txt", "ppt", "pptx", "pdf", "eml", "msg"]
+        panel.allowedContentTypes = ["doc", "docx", "docm", "dotx", "dotm", "xls", "xlsx", "xlsm", "xltx", "xltm",
+                                     "ppt", "pptx", "pptm", "ppsx", "ppsm", "potx", "potm", "csv", "tsv", "txt", "pdf", "eml", "msg"]
             .compactMap { UTType(filenameExtension: $0, conformingTo: .data) }
         panel.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .OK, let url = panel.url, self.ready, self.trusted(self.webView.url) else { return }

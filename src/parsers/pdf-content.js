@@ -3,7 +3,7 @@ import { loadPdfFont } from './pdf-font.js';
 
 const IDENTITY = () => [1, 0, 0, 1, 0, 0];
 const unit = number => Math.max(0, Math.min(1, number));
-function rgb(numbers) { return `#${numbers.map(value => Math.round(unit(value) * 255).toString(16).padStart(2, '0')).join('')}`; }
+export function rgb(numbers) { return `#${numbers.map(value => Math.round(unit(value) * 255).toString(16).padStart(2, '0')).join('')}`; }
 function rectCommands(box) { return [['M', box[0], box[1]], ['L', box[2], box[1]], ['L', box[2], box[3]], ['L', box[0], box[3]], ['Z']]; }
 function jpegDimensions(bytes) {
   if (bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error('PDF JPEG 图片头无效。');

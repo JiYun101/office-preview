@@ -96,7 +96,7 @@ export function parseXls(compound, name) {
     throw new Error('当前 XLS 解析器仅支持 Excel 97–2003 BIFF8 工作簿。');
   }
   if (globals.some(record => record.type === 0x002f)) throw new Error('XLS 工作簿已加密，当前版本不支持解密。');
-  const warnings = ['XLS 已读取基本字体、对齐、边框、填色及行列尺寸；图表、绘图、条件格式和打印分页尚未还原。'];
+  const warnings = ['XLS 已读取基本字体、对齐、边框、填色、行列尺寸和隐藏状态；图表、绘图、条件格式和打印分页尚未还原。'];
   const formatting = readXlsStyles(globals, warnings);
   const bounds = [];
   let sharedStrings = [];
@@ -129,31 +129,34 @@ export function parseXls(compound, name) {
     const rows = [];
     const merges = [];
     const columnWidths = [], columnWidthUnits = [], columnStyles = [], rowHeights = [], rowStyles = [];
+    const hiddenRows = [], hiddenColumns = [];
     let defaultRowHeight = 20, defaultColumnWidthUnits = 8 * 256, standardColumnWidth;
+    let hideEmptyRows = false;
     for (const record of records) {
       const data = binary(record.data);
       if (record.type === 0x0225) {
         const flags = data.u16(0), height = data.u16(2) & 0x7fff;
         if (height) defaultRowHeight = height / 15;
-        if (flags & 2) warn(warnings, '隐藏行和列目前仍可在预览中查看。');
+        hideEmptyRows = !!(flags & 2);
       } else if (record.type === 0x0055) defaultColumnWidthUnits = data.u16(0) * 256;
       else if (record.type === 0x0099) standardColumnWidth = data.u16(0);
       else if (record.type === 0x007d) {
         data.need(0, 10);
         const start = data.u16(0), end = data.u16(2), units = data.u16(4), xf = data.u16(6);
+        const hidden = !!(data.u16(8) & 1);
         if (end < start) throw new Error('XLS 列格式范围无效。');
         for (let column = start; column <= Math.min(end, 1023); column++) {
           if (units > 0) columnWidthUnits[column] = units;
           columnStyles[column] = formatting.style(xf);
+          if (hidden || hiddenColumns[column]) hiddenColumns[column] = hidden;
         }
-        if (data.u16(8) & 1) warn(warnings, '隐藏行和列目前仍可在预览中查看。');
       } else if (record.type === 0x0208) {
         data.need(0, 16);
         const row = data.u16(0), height = data.u16(6) & 0x7fff, flags = data.u16(12);
         if (row >= MAX_ROWS) { warn(warnings, '超出当前行数上限的行格式未显示。'); continue; }
         if (height) rowHeights[row] = height / 15;
         if (flags & 128) rowStyles[row] = formatting.style(data.u16(14) & 0x0fff);
-        if (flags & 32) warn(warnings, '隐藏行和列目前仍可在预览中查看。');
+        hiddenRows[row] = !!(flags & 32);
       }
     }
     if (standardColumnWidth !== undefined) defaultColumnWidthUnits = standardColumnWidth;
@@ -229,10 +232,16 @@ export function parseXls(compound, name) {
       }
     }
     if (pendingString) warn(warnings, '部分公式缺少文本缓存，已显示为空单元格。');
+    if (hideEmptyRows) {
+      const end = merges.reduce((size, range) => Math.max(size, range.endRow + 1), rows.length);
+      for (let row = 0; row < end; row++) {
+        if (!rows[row] && hiddenRows[row] === undefined) hiddenRows[row] = true;
+      }
+    }
     sheets.push({ name: bound.name, rows, merges, columnWidths, columnWidthUnits, rowHeights,
       defaultRowHeight, defaultColumnWidth, defaultColumnWidthUnits,
       defaultFont: formatting.defaultFont, defaultStyle: formatting.defaultStyle,
-      rowStyles, columnStyles, date1904: formatting.date1904 });
+      rowStyles, columnStyles, hiddenRows, hiddenColumns, date1904: formatting.date1904 });
   }
   if (!bounds.length) throw new Error('XLS 中没有可解析的 BoundSheet8 工作表目录。');
   if (!sheets.length) throw new Error('该 XLS 没有当前版本可显示的普通可见工作表。');
